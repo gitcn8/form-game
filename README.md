@@ -1,73 +1,67 @@
 # 🌾 农场主小游戏
 
-一个基于 React + Phaser 的模拟经营农场游戏。
-
-## 🎮 游戏特色
-
-- 🌱 种植系统：耕地、播种、浇水、收获
-- 🐔 动物养殖：养鸡、养牛，收集农产品
-- 🤝 NPC交互：完成任务，建立好感度
-- 💰 经济系统：商店交易，金币管理
-- ☁️ 云存档：跨设备同步游戏进度
-
-## 🛠️ 技术栈
-
-- **前端框架**: React 18 + TypeScript
-- **游戏引擎**: Phaser 3
-- **构建工具**: Vite
-- **状态管理**: Zustand
-- **UI组件**: Ant Design
-- **样式方案**: TailwindCSS
-- **后端服务**: Supabase（认证 + 数据库）
-- **部署平台**: Vercel
-
-## 📋 开发阶段
-
-- [x] 阶段0：准备工作
-- [x] 阶段1：项目初始化
-- [ ] 阶段2：Supabase 集成
-- [ ] 阶段3：基础框架
-- [ ] 阶段4：游戏基础功能
-- [ ] 阶段5：耕种系统
-- [ ] 阶段6：UI 弹窗系统
-- [ ] 阶段7：商店和交易
-- [ ] 阶段8：任务和NPC
-- [ ] 阶段9：动物养殖
-- [ ] 阶段10：打磨和优化
-- [ ] 阶段11：部署和发布
+> 一个基于 React + Phaser 的模拟经营农场游戏
 
 ## 🚀 快速开始
 
-### 安装依赖
-
 ```bash
+# 安装依赖
 npm install
-```
 
-### 启动开发服务器
-
-```bash
+# 启动开发服务器
 npm run dev
 ```
 
 访问 http://localhost:3000
 
-### 构建生产版本
+## 📚 完整文档
 
-```bash
-npm run build
+项目文档已整理到 [docs/](./docs/) 目录：
+
+- **[项目说明](./docs/README.md)** - 项目介绍、技术栈、快速开始
+- **[产品需求文档 (PRD)](./docs/PRD.md)** - 完整的游戏设计和技术架构
+- **[开发流程文档](./docs/DEVELOPMENT.md)** - 详细的开发计划和任务清单
+
+## 📂 项目结构
+
+```
+form-game/
+├── docs/                   # 📚 项目文档
+│   ├── README.md          # 项目说明
+│   ├── PRD.md             # 产品需求文档
+│   └── DEVELOPMENT.md     # 开发流程文档
+│
+├── src/                   # 💻 源代码
+│   ├── components/        # React 组件
+│   ├── game/              # Phaser 游戏代码
+│   ├── pages/             # 页面组件
+│   ├── hooks/             # 自定义 Hooks
+│   ├── lib/               # 工具库
+│   ├── store/             # 状态管理
+│   └── styles/            # 样式文件
+│
+├── public/                # 静态资源
+├── package.json           # 项目配置
+└── vite.config.ts         # Vite 配置
 ```
 
-### 预览生产版本
+## 🛠️ 技术栈
 
-```bash
-npm run preview
-```
+- **前端**: React 18 + TypeScript + Vite
+- **游戏引擎**: Phaser 3
+- **状态管理**: Zustand
+- **UI组件**: Ant Design
+- **样式**: TailwindCSS
+- **后端**: Supabase
 
-## 📚 文档
+## 📋 开发进度
 
-- [产品需求文档 (PRD)](./PRD.md)
-- [开发流程文档](./DEVELOPMENT.md)
+- [x] 阶段0：准备工作
+- [x] 阶段1：项目初始化
+- [ ] 阶段2：Supabase 集成
+- [ ] 阶段3-11：开发中...
+
+详见 [开发流程文档](./docs/DEVELOPMENT.md)
 
 ## 📝 许可证
 
