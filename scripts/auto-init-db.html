@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>自动初始化数据库</title>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+</head>
+<body>
+  <h1>🚀 正在自动初始化数据库...</h1>
+  <div id="log"></div>
+
+  <script>
+    // 从 .env.local 读取的配置
+    const SUPABASE_URL = 'https://xitkpphkffxysouffchy.supabase.co'
+    const SUPABASE_ANON_KEY = 'sb_publishable_Nbz_Rf4c9OqScU6lCZCnFQ_EIt1DWlI'
+
+    const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
+
+    const log = document.getElementById('log')
+
+    function addLog(message, type = 'info') {
+      const div = document.createElement('div')
+      div.style.padding = '8px'
+      div.style.margin = '4px 0'
+      div.style.borderRadius = '4px'
+
+      if (type === 'success') {
+        div.style.background = '#d4edda'
+        div.style.color = '#155724'
+      } else if (type === 'error') {
+        div.style.background = '#f8d7da'
+        div.style.color = '#721c24'
+      } else if (type === 'warning') {
+        div.style.background = '#fff3cd'
+        div.style.color = '#856404'
+      } else {
+        div.style.background = '#e2e3e5'
+        div.style.color = '#383d41'
+      }
+
+      div.textContent = message
+      log.appendChild(div)
+      console.log(message)
+    }
+
+    async function checkTable(tableName) {
+      try {
+        const { data, error } = await supabase
+          .from(tableName)
+          .select('*')
+          .limit(1)
+
+        if (error && error.code === '42P01') {
+          return { exists: false }
+        }
+
+        return { exists: true, error }
+      } catch (err) {
+        return { exists: false, error: err }
+      }
+    }
+
+    async function main() {
+      addLog('🚀 开始自动初始化数据库...', 'info')
+
+      // 检查表是否已存在
+      addLog('📊 检查数据库表...', 'info')
+
+      const tables = ['game_saves', 'player_stats', 'leaderboards']
+      const results = []
+
+      for (const table of tables) {
+        const result = await checkTable(table)
+        results.push({ table, ...result })
+        addLog(`${result.exists ? '✅' : '❌'} ${table}: ${result.exists ? '已存在' : '不存在'}`, result.exists ? 'success' : 'warning')
+      }
+
+      const allExist = results.every(r => r.exists)
+
+      if (allExist) {
+        addLog('✅ 所有表已存在，无需创建！', 'success')
+        addLog('🎉 可以开始游戏了！', 'success')
+        return
+      }
+
+      addLog('⚠️ 部分表不存在，需要手动创建', 'warning')
+      addLog('', 'info')
+      addLog('📖 请按照以下步骤操作：', 'info')
+      addLog('', 'info')
+      addLog('1. 点击下方按钮打开 Supabase SQL Editor', 'info')
+      addLog('2. 复制下面的 SQL 代码', 'info')
+      addLog('3. 粘贴到 SQL Editor 中', 'info')
+      addLog('4. 点击 Run 按钮', 'info')
+      addLog('5. 返回此页面刷新', 'info')
+
+      // 添加打开 SQL Editor 的按钮
+      const button = document.createElement('button')
+      button.textContent = '🔗 打开 Supabase SQL Editor'
+      button.style.padding = '12px 24px'
+      button.style.fontSize = '16px'
+      button.style.background = '#6366f1'
+      button.style.color = 'white'
+      button.style.border = 'none'
+      button.style.borderRadius = '8px'
+      button.style.cursor = 'pointer'
+      button.style.marginTop = '20px'
+      button.onclick = () => window.open('https://supabase.com/dashboard/project/xitkpphkffxysouffchy/sql/new', '_blank')
+      document.body.appendChild(button)
+
+      // 显示 SQL 代码
+      addLog('', 'info')
+      addLog('📋 SQL 代码（已复制到剪贴板）：', 'info')
+
+      const sql = `-- 1. 游戏存档表
+CREATE TABLE game_saves (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  user_id UUID REFERENCES auth.users(id) NOT NULL,
+  save_name TEXT DEFAULT '主存档',
+  game_state JSONB NOT NULL,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW(),
+  is_active BOOLEAN DEFAULT true
+);
+
+CREATE INDEX idx_game_saves_user_id ON game_saves(user_id);
+CREATE INDEX idx_game_saves_is_active ON game_saves(is_active);
+
+ALTER TABLE game_saves ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "用户只能查看自己的存档"
+ON game_saves FOR SELECT USING (auth.uid() = user_id);
+
+CREATE POLICY "用户只能创建自己的存档"
+ON game_saves FOR INSERT WITH CHECK (auth.uid() = user_id);
+
+CREATE POLICY "用户只能更新自己的存档"
+ON game_saves FOR UPDATE USING (auth.uid() = user_id);
+
+CREATE POLICY "用户只能删除自己的存档"
+ON game_saves FOR DELETE USING (auth.uid() = user_id);
+
+-- 2. 玩家统计表
+CREATE TABLE player_stats (
+  user_id UUID REFERENCES auth.users(id) PRIMARY KEY,
+  total_days INTEGER DEFAULT 0,
+  total_earnings INTEGER DEFAULT 0,
+  crops_harvested INTEGER DEFAULT 0,
+  animals_owned INTEGER DEFAULT 0,
+  quests_completed INTEGER DEFAULT 0,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+ALTER TABLE player_stats ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "用户只能查看自己的统计"
+ON player_stats FOR ALL USING (auth.uid() = user_id);
+
+-- 3. 排行榜表
+CREATE TABLE leaderboards (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  user_id UUID REFERENCES auth.users(id),
+  category TEXT NOT NULL,
+  score INTEGER NOT NULL,
+  achieved_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX idx_leaderboards_category ON leaderboards(category);
+CREATE INDEX idx_leaderboards_score ON leaderboards(score DESC);
+
+ALTER TABLE leaderboards ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "所有人可以查看排行榜"
+ON leaderboards FOR SELECT USING (true);
+
+CREATE POLICY "用户只能创建自己的记录"
+ON leaderboards FOR INSERT WITH CHECK (auth.uid() = user_id);`
+
+      const pre = document.createElement('pre')
+      pre.style.background = '#1e293b'
+      pre.style.color = '#4ade80'
+      pre.style.padding = '20px'
+      pre.style.borderRadius = '8px'
+      pre.style.overflow = 'auto'
+      pre.style.fontSize = '12px'
+      pre.textContent = sql
+      document.body.appendChild(pre)
+
+      // 复制到剪贴板
+      navigator.clipboard.writeText(sql).then(() => {
+        addLog('✅ SQL 已自动复制到剪贴板！', 'success')
+      })
+    }
+
+    main()
+  </script>
+</body>
+</html>
