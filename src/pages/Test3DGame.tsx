@@ -1,893 +1,373 @@
-import { useState, useRef, useEffect } from 'react'
-import * as THREE from 'three'
-import { Canvas, useFrame, useThree } from '@react-three/fiber'
+import { useState, useEffect, useMemo } from 'react'
+import { Canvas } from '@react-three/fiber'
 import { Sky } from '@react-three/drei'
-import { PointerLockControls } from '@react-three/drei'
 
-// 材料颜色定义
-const materialColors = {
-  wood: '#8B4513',    // 棕色
-  stone: '#808080',   // 灰色
-  dirt: '#8B6914',    // 褐色
-  grass: '#7CFC00',   // 草绿色
-  coal_ore: '#2C2C2C', // 煤矿（黑色）
-  iron_ore: '#A0522D', // 铁矿（棕红色）
-  gold_ore: '#FFD700', // 金矿（金色）
-  diamond_ore: '#00CED1', // 钻石（青蓝色）
-  bedrock: '#1A1A1A'  // 基岩（深黑色）
-}
-
-// 方块类型定义
-interface BlockType {
-  id: string
-  name: string
-  color: string
-  hardness: number  // 挖掘所需时间（秒）
-  tool: 'pickaxe' | 'shovel' | 'axe' | 'hoe' | null
-  drops: string | null
-  minLevel: number  // 最小Y层
-  maxLevel: number  // 最大Y层
-}
-
-const BLOCK_TYPES: Record<string, BlockType> = {
-  GRASS: { id: 'grass', name: '草方块', color: materialColors.grass, hardness: 1, tool: 'shovel', drops: 'dirt', minLevel: 0, maxLevel: 0 },
-  DIRT: { id: 'dirt', name: '泥土', color: materialColors.dirt, hardness: 1, tool: 'shovel', drops: 'dirt', minLevel: -1, maxLevel: -1 },
-  STONE: { id: 'stone', name: '石头', color: materialColors.stone, hardness: 3, tool: 'pickaxe', drops: 'stone', minLevel: -2, maxLevel: -10 },
-  COAL_ORE: { id: 'coal_ore', name: '煤矿', color: materialColors.coal_ore, hardness: 3, tool: 'pickaxe', drops: 'coal', minLevel: -4, maxLevel: -10 },
-  IRON_ORE: { id: 'iron_ore', name: '铁矿', color: materialColors.iron_ore, hardness: 4, tool: 'pickaxe', drops: 'iron_ore', minLevel: -6, maxLevel: -10 },
-  GOLD_ORE: { id: 'gold_ore', name: '金矿', color: materialColors.gold_ore, hardness: 5, tool: 'pickaxe', drops: 'gold_ore', minLevel: -8, maxLevel: -10 },
-  DIAMOND_ORE: { id: 'diamond_ore', name: '钻石矿', color: materialColors.diamond_ore, hardness: 6, tool: 'pickaxe', drops: 'diamond', minLevel: -10, maxLevel: -10 },
-  BEDROCK: { id: 'bedrock', name: '基岩', color: materialColors.bedrock, hardness: Infinity, tool: null, drops: null, minLevel: -10, maxLevel: -10 },
-  WOOD: { id: 'wood', name: '木头', color: materialColors.wood, hardness: 2, tool: 'axe', drops: 'wood', minLevel: 0, maxLevel: 10 }
-}
-
-// 矿石生成概率
-function generateBlockAt(x: number, y: number, z: number): string {
-  // y=-10 是基岩层（不可破坏）
-  if (y === -10) return 'BEDROCK'
-
-  // 地面层是草地
-  if (y === 0) return 'GRASS'
-
-  // 浅层土壤
-  if (y === -1) {
-    return Math.random() < 0.1 ? 'STONE' : 'DIRT'
-  }
-
-  // 石头层
-  if (y >= -3) {
-    const rand = Math.random()
-    if (rand < 0.05) return 'COAL_ORE'
-    return 'STONE'
-  }
-
-  // 煤矿层
-  if (y >= -5) {
-    const rand = Math.random()
-    if (rand < 0.15) return 'COAL_ORE'
-    if (rand < 0.17) return 'IRON_ORE'
-    return 'STONE'
-  }
-
-  // 铁矿层
-  if (y >= -7) {
-    const rand = Math.random()
-    if (rand < 0.10) return 'COAL_ORE'
-    if (rand < 0.25) return 'IRON_ORE'
-    if (rand < 0.26) return 'GOLD_ORE'
-    return 'STONE'
-  }
-
-  // 金矿层
-  if (y >= -9) {
-    const rand = Math.random()
-    if (rand < 0.08) return 'COAL_ORE'
-    if (rand < 0.20) return 'IRON_ORE'
-    if (rand < 0.30) return 'GOLD_ORE'
-    if (rand < 0.31) return 'DIAMOND_ORE'
-    return 'STONE'
-  }
-
-  // 钻石层
-  const rand = Math.random()
-  if (rand < 0.05) return 'COAL_ORE'
-  if (rand < 0.15) return 'IRON_ORE'
-  if (rand < 0.22) return 'GOLD_ORE'
-  if (rand < 0.28) return 'DIAMOND_ORE'
-  return 'STONE'
-}
-
-// 世界方块组件（地下层、矿石等）
-function WorldBlock({
-  position,
-  blockType,
-  onRemove
-}: {
-  position: [number, number, number]
-  blockType: string
-  onRemove: (position: [number, number, number]) => void
-}) {
-  const [hovered, setHover] = useState(false)
-  const blockData = BLOCK_TYPES[blockType]
-
-  if (!blockData) return null
-
-  return (
-    <mesh
-      position={position}
-      onClick={() => onRemove(position)}
-      onPointerOver={() => setHover(true)}
-      onPointerOut={() => setHover(false)}
-      scale={hovered ? 1.02 : 1}
-      castShadow
-      receiveShadow
-    >
-      <boxGeometry args={[0.98, 0.98, 0.98]} />
-      <meshStandardMaterial color={blockData.color} />
-    </mesh>
-  )
-}
-
-// 农场地块
-function FarmPlot({
-  position,
-  state,
-  onClick
-}: {
-  position: [number, number, number]
-  state: string
-  onClick: () => void
-}) {
-  const [hovered, setHovered] = useState(false)
-
-  const getColor = () => {
-    switch (state) {
-      case 'empty': return '#7CFC00'      // 草绿色（未开垦）
-      case 'tilled': return '#5C4033'     // 深棕色（已开垦）
-      case 'watered': return '#3D2914'    // 深褐色（浇水后）
-      case 'planted': return '#5C4033'    // 深棕色（已种植）
-      case 'ready': return '#5C4033'      // 深棕色（可收获）
-      default: return '#7CFC00'
-    }
-  }
-
-  return (
-    <group position={position}>
-      <mesh
-        onClick={onClick}
-        onPointerOver={() => setHovered(true)}
-        onPointerOut={() => setHovered(false)}
-        scale={hovered ? 1.02 : 1}
-        castShadow
-        receiveShadow
-      >
-        <boxGeometry args={[0.98, 0.2, 0.98]} />
-        <meshStandardMaterial color={getColor()} />
-      </mesh>
-
-      {/* 3D作物 */}
-      {(state === 'planted' || state === 'ready') && (
-        <Crop type="carrot" growthStage={state} />
-      )}
-    </group>
-  )
-}
-
-// 3D作物组件
-function Crop({ type, growthStage }: { type: 'carrot', growthStage: 'planted' | 'ready' }) {
-  if (type === 'carrot') {
-    return <CarrotCrop growthStage={growthStage} />
-  }
-  return null
-}
-
-// 单根胡萝卜组件
-function SingleCarrot({ position, growthStage }: {
-  position: [number, number, number]
-  growthStage: 'planted' | 'ready'
-}) {
-  if (growthStage === 'planted') {
-    // 小苗阶段：2片绿色小叶子
-    return (
-      <group position={position}>
-        {/* 左叶 */}
-        <mesh position={[-0.02, 0.08, 0]} rotation={[0, 0, -0.3]} castShadow>
-          <boxGeometry args={[0.015, 0.08, 0.06]} />
-          <meshStandardMaterial color="#228B22" />
-        </mesh>
-        {/* 右叶 */}
-        <mesh position={[0.02, 0.08, 0]} rotation={[0, 0, 0.3]} castShadow>
-          <boxGeometry args={[0.015, 0.08, 0.06]} />
-          <meshStandardMaterial color="#228B22" />
-        </mesh>
-      </group>
-    )
-  }
-
-  // 成熟阶段：橙色萝卜身 + 绿叶
-  return (
-    <group position={position}>
-      {/* 萝卜身（圆锥体用圆柱模拟） */}
-      <mesh position={[0, 0.12, 0]} castShadow>
-        <cylinderGeometry args={[0.06, 0.025, 0.2, 8]} />
-        <meshStandardMaterial color="#FF8C00" />
-      </mesh>
-
-      {/* 顶部绿叶 */}
-      <mesh position={[0, 0.24, 0]} castShadow>
-        <boxGeometry args={[0.03, 0.06, 0.03]} />
-        <meshStandardMaterial color="#228B22" />
-      </mesh>
-
-      {/* 左叶 */}
-      <mesh position={[-0.04, 0.22, 0]} rotation={[0, 0, -0.5]} castShadow>
-        <boxGeometry args={[0.015, 0.1, 0.04]} />
-        <meshStandardMaterial color="#228B22" />
-      </mesh>
-
-      {/* 右叶 */}
-      <mesh position={[0.04, 0.22, 0]} rotation={[0, 0, 0.5]} castShadow>
-        <boxGeometry args={[0.015, 0.1, 0.04]} />
-        <meshStandardMaterial color="#228B22" />
-      </mesh>
-
-      {/* 后叶 */}
-      <mesh position={[0, 0.22, 0.04]} rotation={[0.2, 0, 0]} castShadow>
-        <boxGeometry args={[0.015, 0.1, 0.04]} />
-        <meshStandardMaterial color="#228B22" />
-      </mesh>
-    </group>
-  )
-}
-
-// 胡萝卜作物（每块地4根）
-function CarrotCrop({ growthStage }: { growthStage: 'planted' | 'ready' }) {
-  if (growthStage === 'planted') {
-    // 小苗阶段：4个小苗
-    const positions: [number, number, number][] = [
-      [-0.3, 0.1, -0.2],
-      [0.3, 0.1, -0.2],
-      [-0.3, 0.1, 0.1],
-      [0.3, 0.1, 0.1]
-    ]
-
-    return (
-      <group>
-        {positions.map((pos, i) => (
-          <SingleCarrot key={i} position={pos} growthStage={growthStage} />
-        ))}
-      </group>
-    )
-  }
-
-  // 成熟阶段：4根胡萝卜
-  const positions: [number, number, number][] = [
-    [-0.3, 0.1, -0.2],
-    [0.3, 0.1, -0.2],
-    [-0.3, 0.1, 0.1],
-    [0.3, 0.1, 0.1]
-  ]
-
-  return (
-    <group>
-      {positions.map((pos, i) => (
-        <SingleCarrot key={i} position={pos} growthStage={growthStage} />
-      ))}
-    </group>
-  )
-}
-
-// 掉落物品组件
-function DroppedItem({ item }: { item: { type: 'carrot', position: [number, number, number], count: number } }) {
-  if (item.type === 'carrot') {
-    return (
-      <group position={item.position}>
-        {/* 3D胡萝卜模型（简化版，单个代表堆叠） */}
-        <mesh position={[0, 0.15, 0]} castShadow>
-          <cylinderGeometry args={[0.06, 0.025, 0.2, 8]} />
-          <meshStandardMaterial color="#FF8C00" />
-        </mesh>
-        <mesh position={[0, 0.27, 0]} castShadow>
-          <boxGeometry args={[0.03, 0.06, 0.03]} />
-          <meshStandardMaterial color="#228B22" />
-        </mesh>
-
-        {/* 数量标签 */}
-        <mesh position={[0.1, 0.3, 0]}>
-          <planeGeometry args={[0.2, 0.1]} />
-          <meshBasicMaterial color="#FFFFFF" transparent opacity={0.8} />
-        </mesh>
-      </group>
-    )
-  }
-  return null
-}
-
-// 房子（方块风格）
-function House({ position }: { position: [number, number, number] }) {
-  return (
-    <group position={position}>
-      {/* 房子主体 */}
-      <mesh position={[0, 1.5, 0]} castShadow receiveShadow>
-        <boxGeometry args={[3, 3, 3]} />
-        <meshStandardMaterial color="#CD853F" />
-      </mesh>
-
-      {/* 屋顶 */}
-      <mesh position={[0, 3.75, 0]} castShadow>
-        <boxGeometry args={[3.5, 1.5, 3.5]} />
-        <meshStandardMaterial color="#8B4513" />
-      </mesh>
-
-      {/* 门 */}
-      <mesh position={[0, 0.8, 1.51]} castShadow>
-        <boxGeometry args={[1, 1.6, 0.15]} />
-        <meshStandardMaterial color="#654321" />
-      </mesh>
-
-      {/* 窗户 */}
-      <mesh position={[0.9, 1.8, 1.51]} castShadow>
-        <boxGeometry args={[0.7, 0.7, 0.15]} />
-        <meshStandardMaterial color="#ADD8E6" />
-      </mesh>
-      <mesh position={[-0.9, 1.8, 1.51]} castShadow>
-        <boxGeometry args={[0.7, 0.7, 0.15]} />
-        <meshStandardMaterial color="#ADD8E6" />
-      </mesh>
-    </group>
-  )
-}
-
-// 已放置的方块组件
-function PlacedBlock({
-  block,
-  onRemove
-}: {
-  block: { id: string, type: 'wood' | 'stone' | 'dirt', position: [number, number, number] }
-  onRemove: (blockId: string) => void
-}) {
-  return (
-    <mesh
-      position={block.position}
-      onClick={(e) => {
-        e.stopPropagation()
-        onRemove(block.id)
-      }}
-      onPointerOver={(e) => {
-        e.stopPropagation()
-        (e.eventObject as any).userData.hovered = true
-      }}
-      onPointerOut={(e) => {
-        (e.eventObject as any).userData.hovered = false
-      }}
-      castShadow
-      receiveShadow
-    >
-      <boxGeometry args={[0.98, 0.98, 0.98]} />
-      <meshStandardMaterial color={materialColors[block.type]} />
-    </mesh>
-  )
-}
-
-// 建造预览组件（半透明方块）
-function BuildPreview({
-  buildMode,
-  selectedMaterial,
-  placedBlocks,
-  maxDistance = 5
-}: {
-  buildMode: boolean
-  selectedMaterial: 'wood' | 'stone' | 'dirt'
-  placedBlocks: Array<{ id: string, type: 'wood' | 'stone' | 'dirt', position: [number, number, number] }>
-  maxDistance?: number
-}) {
-  const { camera } = useThree()
-  const [previewPosition, setPreviewPosition] = useState<[number, number, number] | null>(null)
-  const raycaster = useRef(new THREE.Raycaster())
-  const direction = useRef(new THREE.Vector3())
-
-  useFrame(() => {
-    if (!buildMode) {
-      setPreviewPosition(null)
-      return
-    }
-
-    // 从相机向前发射射线
-    raycaster.current.setFromCamera({ x: 0, y: 0 }, camera)
-
-    // 检测与地面的交点
-    const groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0)
-    const intersectPoint = new THREE.Vector3()
-    raycaster.current.ray.intersectPlane(groundPlane, intersectPoint)
-
-    if (intersectPoint) {
-      // 检查距离
-      const distance = camera.position.distanceTo(intersectPoint)
-      if (distance > maxDistance) {
-        setPreviewPosition(null)
-        return
-      }
-
-      // 对齐到网格
-      const alignedX = Math.round(intersectPoint.x)
-      const alignedY = Math.round(intersectPoint.y + 0.5)  // 在地面上方
-      const alignedZ = Math.round(intersectPoint.z)
-
-      // 检查该位置是否已有方块
-      const posKey = `${alignedX},${alignedY},${alignedZ}`
-      const hasBlock = placedBlocks.some(b => b.id === posKey)
-
-      if (!hasBlock) {
-        setPreviewPosition([alignedX, alignedY, alignedZ])
-      } else {
-        setPreviewPosition(null)
-      }
-    }
-  })
-
-  if (!buildMode || !previewPosition) return null
-
-  return (
-    <mesh position={previewPosition}>
-      <boxGeometry args={[0.98, 0.98, 0.98]} />
-      <meshStandardMaterial
-        color={materialColors[selectedMaterial]}
-        transparent
-        opacity={0.5}
-      />
-    </mesh>
-  )
-}
-
-// 树木（方块风格）
-function Tree({
-  position,
-  onChop
-}: {
-  position: [number, number, number]
-  onChop: () => void
-}) {
-  const [isChopped, setIsChopped] = useState(false)
-
-  const handleClick = () => {
-    if (isChopped) return
-
-    setIsChopped(true)
-    onChop()
-
-    // 5秒后重生
-    setTimeout(() => setIsChopped(false), 5000)
-  }
-
-  if (isChopped) return null
-
-  return (
-    <group position={position} onClick={handleClick}>
-      <mesh position={[0, 0.5, 0]} castShadow>
-        <boxGeometry args={[0.4, 1, 0.4]} />
-        <meshStandardMaterial color="#8B4513" />
-      </mesh>
-      <mesh position={[0, 1.8, 0]} castShadow>
-        <boxGeometry args={[1.2, 1.6, 1.2]} />
-        <meshStandardMaterial color="#228B22" />
-      </mesh>
-    </group>
-  )
-}
-
-// 地面点击检测组件（射线检测）
-function GroundClickHandler({ onGroundClick }: { onGroundClick: (position: [number, number, number]) => void }) {
-  const { camera, gl } = useThree()
-  const raycaster = useRef(new THREE.Raycaster())
-  const mouse = useRef(new THREE.Vector2())
-
-  useEffect(() => {
-    const handleClick = (event: MouseEvent) => {
-      // 计算鼠标位置（归一化到-1到1）
-      mouse.current.x = 0  // 准心在屏幕中心
-      mouse.current.y = 0
-
-      // 从相机发射射线
-      raycaster.current.setFromCamera(mouse.current, camera)
-
-      // 创建地平面
-      const groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0)
-
-      // 检测射线与地面的交点
-      const intersectPoint = new THREE.Vector3()
-      raycaster.current.ray.intersectPlane(groundPlane, intersectPoint)
-
-      if (intersectPoint) {
-        // 限制在草地范围内（-50到50）
-        const x = Math.max(-50, Math.min(50, intersectPoint.x))
-        const z = Math.max(-50, Math.min(50, intersectPoint.z))
-
-        onGroundClick([x, 0, z])
-      }
-    }
-
-    window.addEventListener('click', handleClick)
-    return () => window.removeEventListener('click', handleClick)
-  }, [camera, onGroundClick])
-
-  return null
-}
-
-// 火柴盒人（方块风格）
-function Player({
-  position,
-  rotation,
-  visible,
-  isMoving,
-  colors
-}: {
-  position: [number, number, number]
-  rotation: number
-  visible: boolean
-  isMoving: boolean
-  colors: {
-    head: string
-    body: string
-    limbs: string
-  }
-}) {
-  const leftArmRotation = useRef(0)
-  const rightArmRotation = useRef(0)
-  const leftLegRotation = useRef(0)
-  const rightLegRotation = useRef(0)
-
-  // 更新四肢摆动动画
-  useFrame(() => {
-    if (isMoving) {
-      const time = performance.now() / 1000
-      const swingSpeed = 10  // 摆动速度
-      const swingAmount = 0.5  // 摆动幅度（弧度）
-
-      // 左臂和右腿同步（前后摆动）
-      leftArmRotation.current = Math.sin(time * swingSpeed) * swingAmount
-      rightLegRotation.current = Math.sin(time * swingSpeed) * swingAmount
-
-      // 右臂和左腿同步（前后摆动，方向相反）
-      rightArmRotation.current = Math.sin(time * swingSpeed + Math.PI) * swingAmount
-      leftLegRotation.current = Math.sin(time * swingSpeed + Math.PI) * swingAmount
-    } else {
-      // 停止移动时，四肢恢复直立
-      leftArmRotation.current = 0
-      rightArmRotation.current = 0
-      leftLegRotation.current = 0
-      rightLegRotation.current = 0
-    }
-  })
-
-  if (!visible) return null
-
-  return (
-    <group position={position} rotation={[0, rotation, 0]}>
-      {/* 头部 */}
-      <mesh position={[0, 1.7, 0]} castShadow>
-        <boxGeometry args={[0.4, 0.4, 0.4]} />
-        <meshStandardMaterial color={colors.head} />
-      </mesh>
-
-      {/* 身体 */}
-      <mesh position={[0, 1.25, 0]} castShadow>
-        <boxGeometry args={[0.5, 0.7, 0.3]} />
-        <meshStandardMaterial color={colors.body} />
-      </mesh>
-
-      {/* 左臂 */}
-      <mesh position={[-0.35, 1.25, 0]} rotation={[leftArmRotation.current, 0, 0]} castShadow>
-        <boxGeometry args={[0.15, 0.7, 0.15]} />
-        <meshStandardMaterial color={colors.limbs} />
-      </mesh>
-
-      {/* 右臂 */}
-      <mesh position={[0.35, 1.25, 0]} rotation={[rightArmRotation.current, 0, 0]} castShadow>
-        <boxGeometry args={[0.15, 0.7, 0.15]} />
-        <meshStandardMaterial color={colors.limbs} />
-      </mesh>
-
-      {/* 左腿 */}
-      <mesh position={[-0.12, 0.6, 0]} rotation={[leftLegRotation.current, 0, 0]} castShadow>
-        <boxGeometry args={[0.18, 0.6, 0.18]} />
-        <meshStandardMaterial color={colors.limbs} />
-      </mesh>
-
-      {/* 右腿 */}
-      <mesh position={[0.12, 0.6, 0]} rotation={[rightLegRotation.current, 0, 0]} castShadow>
-        <boxGeometry args={[0.18, 0.6, 0.18]} />
-        <meshStandardMaterial color={colors.limbs} />
-      </mesh>
-    </group>
-  )
-}
-
-// 玩家控制器（第一人称/第三人称）
-function FirstPersonController({
-  onLockChange,
-  cameraMode,
-  onPlayerPositionChange,
-  onPlayerRotationChange,
-  onMovingChange
-}: {
-  onLockChange: (locked: boolean) => void
-  cameraMode: 'first' | 'third'
-  onPlayerPositionChange: (pos: [number, number, number]) => void
-  onPlayerRotationChange: (rotation: number) => void
-  onMovingChange: (isMoving: boolean) => void
-}) {
-  const { camera, gl } = useThree()
-  const controls = useRef<any>(null)
-
-  const moveForward = useRef(false)
-  const moveBackward = useRef(false)
-  const moveLeft = useRef(false)
-  const moveRight = useRef(false)
-
-  const velocity = useRef([0, 0, 0])
-  const direction = useRef([0, 0, 0])
-  const playerPos = useRef([0, 0, 5])
-  const playerRotation = useRef(0)
-
-  // 脚步声
-  const audioContext = useRef<AudioContext | null>(null)
-  const lastStepTime = useRef(0)
-  const stepInterval = 0.5 // 脚步间隔（秒）
-
-  // 播放脚步声
-  const playFootstep = () => {
-    if (!audioContext.current) {
-      audioContext.current = new (window.AudioContext || (window as any).webkitAudioContext)()
-    }
-
-    const ctx = audioContext.current
-    const oscillator = ctx.createOscillator()
-    const gainNode = ctx.createGain()
-
-    // 使用低频振荡器模拟脚步声
-    oscillator.connect(gainNode)
-    gainNode.connect(ctx.destination)
-
-    oscillator.frequency.value = 80 + Math.random() * 40 // 随机低频
-    oscillator.type = 'triangle'
-
-    // 音量包络（快速衰减）
-    gainNode.gain.setValueAtTime(0.3, ctx.currentTime)
-    gainNode.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.1)
-
-    oscillator.start(ctx.currentTime)
-    oscillator.stop(ctx.currentTime + 0.1)
-  }
-
-  useEffect(() => {
-    if (!controls.current) return
-
-    // 监听锁定状态
-    const handleLock = () => onLockChange(true)
-    const handleUnlock = () => onLockChange(false)
-
-    controls.current.addEventListener('lock', handleLock)
-    controls.current.addEventListener('unlock', handleUnlock)
-
-    return () => {
-      controls.current?.removeEventListener('lock', handleLock)
-      controls.current?.removeEventListener('unlock', handleUnlock)
-    }
-  }, [onLockChange])
-
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      switch (e.code) {
-        case 'KeyW':
-        case 'ArrowUp':
-          moveForward.current = true; break
-        case 'KeyS':
-        case 'ArrowDown':
-          moveBackward.current = true; break
-        case 'KeyA':
-        case 'ArrowLeft':
-          moveLeft.current = true; break
-        case 'KeyD':
-        case 'ArrowRight':
-          moveRight.current = true; break
-      }
-    }
-
-    const handleKeyUp = (e: KeyboardEvent) => {
-      switch (e.code) {
-        case 'KeyW':
-        case 'ArrowUp':
-          moveForward.current = false; break
-        case 'KeyS':
-        case 'ArrowDown':
-          moveBackward.current = false; break
-        case 'KeyA':
-        case 'ArrowLeft':
-          moveLeft.current = false; break
-        case 'KeyD':
-        case 'ArrowRight':
-          moveRight.current = false; break
-      }
-    }
-
-    document.addEventListener('keydown', handleKeyDown)
-    document.addEventListener('keyup', handleKeyUp)
-
-    return () => {
-      document.removeEventListener('keydown', handleKeyDown)
-      document.removeEventListener('keyup', handleKeyUp)
-    }
-  }, [])
-
-  useFrame(() => {
-    if (!controls.current) return
-
-    const speed = 0.15
-    const [vx, vy, vz] = velocity.current
-    const [dx, dy, dz] = direction.current
-    const [px, py, pz] = playerPos.current
-
-    // 获取相机旋转角度（用于玩家朝向）
-    const euler = new THREE.Euler().setFromQuaternion(camera.quaternion)
-    playerRotation.current = euler.y
-
-    // 阻尼效果
-    velocity.current = [
-      vx - vx * 0.1,
-      vy - vy * 0.1,
-      vz - vz * 0.1
-    ]
-
-    direction.current = [
-      dx - dx * 0.1,
-      dy - dy * 0.1,
-      dz - dz * 0.1
-    ]
-
-    // 移动输入
-    if (moveForward.current) velocity.current[2] -= speed * 0.1
-    if (moveBackward.current) velocity.current[2] += speed * 0.1
-    if (moveLeft.current) velocity.current[0] -= speed * 0.1
-    if (moveRight.current) velocity.current[0] += speed * 0.1
-
-    // 应用移动
-    const newPx = px + velocity.current[0]
-    const newPz = pz + velocity.current[2]
-
-    // 边界限制
-    playerPos.current = [
-      Math.max(-25, Math.min(25, newPx)),
-      0,
-      Math.max(-25, Math.min(25, newPz))
-    ]
-
-    // 通知父组件玩家位置和旋转
-    onPlayerPositionChange([...playerPos.current] as [number, number, number])
-    onPlayerRotationChange(playerRotation.current)
-
-    // 检测是否在移动
-    const isMoving = Math.abs(velocity.current[0]) > 0.001 || Math.abs(velocity.current[2]) > 0.001
-
-    // 通知父组件玩家是否在移动
-    onMovingChange(isMoving)
-
-    // 根据视角模式设置相机位置
-    if (cameraMode === 'first') {
-      // 第一人称：眼睛高度
-      const time = performance.now() / 1000
-      const bobSpeed = 10
-      const bobAmount = 0.05
-
-      let cameraY = 1.6
-      if (isMoving) {
-        cameraY = 1.6 + Math.sin(time * bobSpeed) * bobAmount
-      }
-
-      camera.position.set(
-        playerPos.current[0],
-        cameraY,
-        playerPos.current[2]
-      )
-
-      // 脚步声 - 根据晃动节奏播放
-      if (isMoving) {
-        const phase = Math.sin(time * bobSpeed)
-        const timeSinceLastStep = time - lastStepTime.current
-
-        if (phase < -0.9 && timeSinceLastStep > stepInterval) {
-          playFootstep()
-          lastStepTime.current = time
-        }
-      }
-    } else {
-      // 第三人称：相机在玩家身后上方
-      const thirdPersonDistance = 6
-      const thirdPersonHeight = 4
-
-      // 计算相机位置（在玩家身后）
-      const offsetX = Math.sin(playerRotation.current) * thirdPersonDistance
-      const offsetZ = Math.cos(playerRotation.current) * thirdPersonDistance
-
-      camera.position.set(
-        playerPos.current[0] - offsetX,
-        playerPos.current[1] + thirdPersonHeight,
-        playerPos.current[2] - offsetZ
-      )
-    }
-  })
-
-  return (
-    <PointerLockControls
-      ref={controls}
-      args={[camera, gl.domElement]}
-    />
-  )
-}
+// World Components
+import { FarmPlot } from '../components/world/FarmPlot'
+import { DroppedItem } from '../components/world/DroppedItem'
+import { GroundClickHandler } from '../components/world/GroundClickHandler'
+import { InfiniteGround, InfiniteTrees } from '../components/world/ChunkSystem'
+import { GrassDecorations } from '../components/world/GrassDecorations'
+
+// Player Components
+import { Player } from '../components/player/Player'
+import { FirstPersonController } from '../components/player/FirstPersonController'
+
+// Building Components
+import { PlacedBlock } from '../components/building/PlacedBlock'
+import { BuildPreview } from '../components/building/BuildPreview'
+
+// Mining Components
+import { UndergroundBlocks } from '../components/mining/UndergroundBlocks'
+import { MiningSystem } from '../components/mining/MiningSystem'
+import { MiningProgressBar } from '../components/mining/MiningProgressBar'
+
+// UI Components
+import { Shop } from '../components/ui/Shop'
+import { Inventory } from '../components/ui/Inventory'
+import { ColorPanel } from '../components/ui/ColorPanel'
+import { PauseMenu } from '../components/ui/PauseMenu'
+import { HUD } from '../components/ui/HUD'
+
+// Inventory Components
+import { Hotbar } from '../components/inventory/Hotbar'
+import { InventoryPanel } from '../components/inventory/InventoryPanel'
+import {
+  ItemStack,
+  createStack,
+  createEmptyStack,
+  isEmpty,
+  canStack,
+  mergeStacks,
+  BlockType,
+  CropType,
+  ToolType,
+  DecorationType,
+  MachineType,
+  AnimalType,
+  SpecialType,
+  FacilityType,
+  AnimalProductType,
+  TreeType
+} from '../components/inventory/ItemStack'
+
+// Farming Components
+import { CROP_CONFIG, getCropConfig, isCropReady } from '../components/farming/CropConfig'
+import { SeedType as FarmingSeedType, SEED_CONFIG, getSeedTypeByCrop, buySeedPack, calculateSeedCost, SEED_SHOP_ITEMS } from '../components/farming/SeedConfig'
+import { TREE_CONFIG, getTreeConfig, isTreeReady, getTreeGrowthProgress } from '../components/farming/TreeConfig'
+
+// Animal Components
+import { PlacedAnimal as PlacedAnimalComponent } from '../components/animals/PlacedAnimal'
+import { ANIMAL_CONFIGS, PlacedAnimal, shouldUpgradeGrowthStage, isAnimalHungry, canAnimalProduce } from '../components/animals/AnimalConfig'
 
 // 主场景
 function FarmScene3D() {
   // 动态地块数据：用Map存储，key为位置字符串 "x,z"，value为地块状态
-  const [plots, setPlots] = useState<Map<string, { state: string, position: [number, number, number] }>>(new Map())
-  const [currentTool, setCurrentTool] = useState('hoe')
-  const [message, setMessage] = useState('点击开始 | WASD移动 | 鼠标控制视角 | 左键点击草地开垦')
+  const [plots, setPlots] = useState<Map<string, {
+    state: string
+    position: [number, number, number]
+    cropType?: CropType  // 新增：作物类型
+    plantTime?: number   // 新增：种植时间戳（毫秒）
+  }>>(new Map())
+
+  const [selectedSeed, setSelectedSeed] = useState<CropType>('carrot') // 当前选中的种子（默认）
+  const [message, setMessage] = useState('点击开始 | 无限探索 | WASD移动 | 鼠标控制视角 | 按1-8切换工具/种子')
   const [isLocked, setIsLocked] = useState(false)
 
   // 物品系统
-  const [droppedItems, setDroppedItems] = useState<Array<{ id: string, type: 'carrot', position: [number, number, number], count: number }>>([])
-  const [inventory, setInventory] = useState<{ carrot: number, wood: number, stone: number, dirt: number }>({
+  const [droppedItems, setDroppedItems] = useState<Array<{ id: string; type: 'carrot' | 'dirt' | 'stone' | 'coal' | 'iron_ore' | 'gold_ore' | 'diamond' | 'egg' | 'milk' | 'wool' | 'meat' | 'apple' | 'orange' | 'peach' | 'cherry' | 'pear'; position: [number, number, number]; count: number }>>([])
+  const [inventory, setInventory] = useState<{
+    carrot: number
+    wood: number
+    stone: number
+    dirt: number
+    coal: number
+    iron_ore: number
+    gold_ore: number
+    diamond: number
+    // 新增建筑材料
+    glass: number
+    door: number
+    planks: number
+  }>({
     carrot: 0,
-    wood: 0,  // 初始木材已用于建房
+    wood: 0, // 初始木材已用于建房
     stone: 0,
-    dirt: 0
+    dirt: 0,
+    coal: 0,
+    iron_ore: 0,
+    gold_ore: 0,
+    diamond: 0,
+    glass: 0,
+    door: 0,
+    planks: 0
   })
-  const [gold, setGold] = useState(50)  // 初始金币
+  const [gold, setGold] = useState(100) // 初始金币
   const [showInventory, setShowInventory] = useState(false)
-  const [showShop, setShowShop] = useState(false)  // 商店面板
+  const [showShop, setShowShop] = useState(false) // 商店面板
+
+  // 作物解锁系统
+  const [unlockedCrops, setUnlockedCrops] = useState<CropType[]>(['wheat']) // 已解锁的作物
+  const [harvestedCrops, setHarvestedCrops] = useState<Set<CropType>>(new Set()) // 已收获过的作物
+
+  // 新背包系统
+  const [inventorySlots, setInventorySlots] = useState<ItemStack[]>(() => {
+    // 初始化64个背包槽位
+    const slots: ItemStack[] = []
+
+    // 槽位1-3：农场工具
+    const tools: ToolType[] = ['hoe', 'watering_can', 'sickle']
+    for (let i = 0; i < 3; i++) {
+      const stack = createStack(tools[i], 1)
+      if (stack) slots.push(stack)
+      else slots.push(createEmptyStack())
+    }
+
+    // 槽位4：小麦种子 x20（开局只给小麦，成熟最快）
+    // 注意：游戏设计中，作物可以直接作为种子种植
+    const wheatSeedStack = createStack('wheat', 20)
+    if (wheatSeedStack) slots.push(wheatSeedStack)
+    else slots.push(createEmptyStack())
+
+    // 槽位5-8：空槽位（后续通过收获解锁）
+    for (let i = 5; i < 8; i++) {
+      slots.push(createEmptyStack())
+    }
+
+    // 后56个槽位：空槽位
+    for (let i = 8; i < 64; i++) {
+      slots.push(createEmptyStack())
+    }
+
+    return slots
+  })
+  const [selectedHotbarSlot, setSelectedHotbarSlot] = useState(0) // 当前选中的快捷栏槽位
+
+  // 快捷栏直接使用背包的前8个槽位
+  const hotbarSlots = useMemo(() => inventorySlots.slice(0, 8), [inventorySlots])
+
+  // 辅助函数：更新快捷栏槽位（更新inventorySlots的前8个）
+  const updateHotbarSlot = (index: number, newValue: ItemStack) => {
+    setInventorySlots((prev) => {
+      const newSlots = [...prev]
+      newSlots[index] = newValue
+      return newSlots
+    })
+  }
+
+  // 作物解锁顺序（渐进式解锁）
+  const CROP_UNLOCK_ORDER: CropType[] = [
+    'wheat',   // 开局赠送
+    'carrot',  // 首次收获小麦后解锁
+    'potato',  // 首次收获胡萝卜后解锁
+    'tomato',  // 首次收获土豆后解锁
+    'pumpkin'  // 首次收获番茄后解锁
+  ]
+
+  // 解锁下一个作物的函数
+  const unlockNextCrop = (currentCrop: CropType) => {
+    const currentIndex = CROP_UNLOCK_ORDER.indexOf(currentCrop)
+    const nextCrop = CROP_UNLOCK_ORDER[currentIndex + 1]
+
+    if (nextCrop && !unlockedCrops.includes(nextCrop)) {
+      // 解锁新作物
+      setUnlockedCrops((prev) => [...prev, nextCrop])
+
+      // 赠送该作物的种子10个
+      // 注意：游戏设计中，作物可以直接作为种子种植
+      const newSeedStack = createStack(nextCrop, 10)
+      if (newSeedStack) {
+        setInventorySlots((prev) => {
+          const newSlots = [...prev]
+          // 找到第一个空的快捷栏槽位（槽位5-8）
+          for (let i = 4; i < 8; i++) {
+            if (isEmpty(newSlots[i])) {
+              newSlots[i] = newSeedStack
+              setMessage(`🎉 恭喜！解锁了新作物：${getCropConfig(nextCrop).name}！赠送种子 x10`)
+              break
+            }
+          }
+          return newSlots
+        })
+      }
+    }
+  }
+
+  // 作物生长检查 - 每秒检查一次是否有作物成熟
+  useEffect(() => {
+    const growthCheckInterval = setInterval(() => {
+      setPlots((prev) => {
+        const updated = new Map(prev)
+        let hasNewReady = false
+
+        updated.forEach((plot, posKey) => {
+          if (plot.state === 'planted' && plot.cropType && plot.plantTime) {
+            // 检查是否成熟
+            if (isCropReady(plot.plantTime, plot.cropType)) {
+              plot.state = 'ready'
+              updated.set(posKey, plot)
+              hasNewReady = true
+            }
+          }
+        })
+
+        if (hasNewReady) {
+          const cropTypes = Array.from(updated.values())
+            .filter(p => p.state === 'ready' && p.cropType)
+            .map(p => getCropConfig(p.cropType!).name)
+          const uniqueCrops = [...new Set(cropTypes)]
+          setMessage(`🎉 ${uniqueCrops.join('、')}成熟了！快来收获！`)
+        }
+
+        return updated
+      })
+    }, 1000) // 每秒检查一次
+
+    return () => clearInterval(growthCheckInterval)
+  }, [])
+
+  // 挖矿系统
+  const [minedBlocks, setMinedBlocks] = useState<Set<string>>(new Set()) // 已挖掘的方块
+  const [miningProgress, setMiningProgress] = useState({ progress: 0, targetBlock: '', visible: false }) // 挖掘进度
+  const [targetBlock, setTargetBlock] = useState<string | null>(null) // 当前瞄准的方块
 
   // 建造系统 - 初始包含简陋房屋
   const [buildMode, setBuildMode] = useState(false)
   const [selectedMaterial, setSelectedMaterial] = useState<'wood' | 'stone' | 'dirt'>('wood')
-  const [placedBlocks, setPlacedBlocks] = useState<Array<{ id: string, type: 'wood' | 'stone' | 'dirt', position: [number, number, number] }>>([
-    // 地板（3x3）
-    { id: 'house_floor_0', type: 'wood', position: [-1, 0, 4] },
-    { id: 'house_floor_1', type: 'wood', position: [0, 0, 4] },
-    { id: 'house_floor_2', type: 'wood', position: [1, 0, 4] },
-    { id: 'house_floor_3', type: 'wood', position: [-1, 0, 5] },
-    { id: 'house_floor_4', type: 'wood', position: [0, 0, 5] },
-    { id: 'house_floor_5', type: 'wood', position: [1, 0, 5] },
-    { id: 'house_floor_6', type: 'wood', position: [-1, 0, 6] },
-    { id: 'house_floor_7', type: 'wood', position: [0, 0, 6] },
-    { id: 'house_floor_8', type: 'wood', position: [1, 0, 6] },
-    // 墙壁（2格高，留门）
-    { id: 'house_wall_0', type: 'wood', position: [-1, 1, 4] },
-    { id: 'house_wall_1', type: 'wood', position: [1, 1, 4] },
-    { id: 'house_wall_2', type: 'wood', position: [-1, 1, 5] },
-    // [0, 1, 5] 是门的位置，空着
-    { id: 'house_wall_4', type: 'wood', position: [1, 1, 5] },
-    { id: 'house_wall_5', type: 'wood', position: [-1, 1, 6] },
-    { id: 'house_wall_6', type: 'wood', position: [0, 1, 6] },
-    { id: 'house_wall_7', type: 'wood', position: [1, 1, 6] },
-    { id: 'house_wall_8', type: 'wood', position: [-1, 2, 4] },
-    { id: 'house_wall_9', type: 'wood', position: [1, 2, 4] },
-    { id: 'house_wall_10', type: 'wood', position: [-1, 2, 5] },
-    { id: 'house_wall_11', type: 'wood', position: [1, 2, 5] },
-    { id: 'house_wall_12', type: 'wood', position: [-1, 2, 6] },
-    { id: 'house_wall_13', type: 'wood', position: [0, 2, 6] },
-    { id: 'house_wall_14', type: 'wood', position: [1, 2, 6] },
-    // 屋顶（3x3）
-    { id: 'house_roof_0', type: 'wood', position: [-1, 3, 4] },
-    { id: 'house_roof_1', type: 'wood', position: [0, 3, 4] },
-    { id: 'house_roof_2', type: 'wood', position: [1, 3, 4] },
-    { id: 'house_roof_3', type: 'wood', position: [-1, 3, 5] },
-    { id: 'house_roof_4', type: 'wood', position: [0, 3, 5] },
-    { id: 'house_roof_5', type: 'wood', position: [1, 3, 5] },
-    { id: 'house_roof_6', type: 'wood', position: [-1, 3, 6] },
-    { id: 'house_roof_7', type: 'wood', position: [0, 3, 6] },
-    { id: 'house_roof_8', type: 'wood', position: [1, 3, 6] }
+  const [placedBlocks, setPlacedBlocks] = useState<
+    Array<{ id: string; type: 'wood' | 'stone' | 'dirt' | 'door' | 'glass' | 'planks'; position: [number, number, number] }>
+  >([
+    // 5x5 木屋（Minecraft风格）
+
+    // 地基（5x5）
+    { id: 'house_floor_0', type: 'planks', position: [-2, 0, 2] },
+    { id: 'house_floor_1', type: 'planks', position: [-1, 0, 2] },
+    { id: 'house_floor_2', type: 'planks', position: [0, 0, 2] },
+    { id: 'house_floor_3', type: 'planks', position: [1, 0, 2] },
+    { id: 'house_floor_4', type: 'planks', position: [2, 0, 2] },
+    { id: 'house_floor_5', type: 'planks', position: [-2, 0, 3] },
+    { id: 'house_floor_6', type: 'planks', position: [-1, 0, 3] },
+    { id: 'house_floor_7', type: 'planks', position: [0, 0, 3] },
+    { id: 'house_floor_8', type: 'planks', position: [1, 0, 3] },
+    { id: 'house_floor_9', type: 'planks', position: [2, 0, 3] },
+    { id: 'house_floor_10', type: 'planks', position: [-2, 0, 4] },
+    { id: 'house_floor_11', type: 'planks', position: [-1, 0, 4] },
+    { id: 'house_floor_12', type: 'planks', position: [0, 0, 4] },
+    { id: 'house_floor_13', type: 'planks', position: [1, 0, 4] },
+    { id: 'house_floor_14', type: 'planks', position: [2, 0, 4] },
+    { id: 'house_floor_15', type: 'planks', position: [-2, 0, 5] },
+    { id: 'house_floor_16', type: 'planks', position: [-1, 0, 5] },
+    { id: 'house_floor_17', type: 'planks', position: [0, 0, 5] },
+    { id: 'house_floor_18', type: 'planks', position: [1, 0, 5] },
+    { id: 'house_floor_19', type: 'planks', position: [2, 0, 5] },
+    { id: 'house_floor_20', type: 'planks', position: [-2, 0, 6] },
+    { id: 'house_floor_21', type: 'planks', position: [-1, 0, 6] },
+    { id: 'house_floor_22', type: 'planks', position: [0, 0, 6] },
+    { id: 'house_floor_23', type: 'planks', position: [1, 0, 6] },
+    { id: 'house_floor_24', type: 'planks', position: [2, 0, 6] },
+
+    // 墙壁（3格高）
+    // 后墙
+    { id: 'house_wall_back_0', type: 'wood', position: [-2, 1, 2] },
+    { id: 'house_wall_back_1', type: 'wood', position: [-1, 1, 2] },
+    { id: 'house_wall_back_2', type: 'wood', position: [0, 1, 2] },
+    { id: 'house_wall_back_3', type: 'wood', position: [1, 1, 2] },
+    { id: 'house_wall_back_4', type: 'wood', position: [2, 1, 2] },
+    { id: 'house_wall_back_5', type: 'wood', position: [-2, 2, 2] },
+    { id: 'house_wall_back_6', type: 'wood', position: [-1, 2, 2] },
+    { id: 'house_wall_back_7', type: 'wood', position: [0, 2, 2] },
+    { id: 'house_wall_back_8', type: 'wood', position: [1, 2, 2] },
+    { id: 'house_wall_back_9', type: 'wood', position: [2, 2, 2] },
+    { id: 'house_wall_back_10', type: 'wood', position: [-2, 3, 2] },
+    { id: 'house_wall_back_11', type: 'wood', position: [-1, 3, 2] },
+    { id: 'house_wall_back_12', type: 'wood', position: [0, 3, 2] },
+    { id: 'house_wall_back_13', type: 'wood', position: [1, 3, 2] },
+    { id: 'house_wall_back_14', type: 'wood', position: [2, 3, 2] },
+
+    // 前墙（带门和窗户）
+    { id: 'house_wall_front_0', type: 'wood', position: [-2, 1, 6] },
+    { id: 'house_wall_front_1', type: 'wood', position: [-1, 1, 6] },
+    // [0, 1, 6] 是门的位置
+    { id: 'house_wall_front_3', type: 'wood', position: [1, 1, 6] },
+    { id: 'house_wall_front_4', type: 'wood', position: [2, 1, 6] },
+    { id: 'house_wall_front_5', type: 'wood', position: [-2, 2, 6] },
+    { id: 'house_wall_front_6', type: 'glass', position: [-1, 2, 6] }, // 左窗户
+    // [0, 2, 6] 是门的上半部分
+    { id: 'house_wall_front_8', type: 'glass', position: [1, 2, 6] }, // 右窗户
+    { id: 'house_wall_front_9', type: 'wood', position: [2, 2, 6] },
+    { id: 'house_wall_front_10', type: 'wood', position: [-2, 3, 6] },
+    { id: 'house_wall_front_11', type: 'wood', position: [-1, 3, 6] },
+    { id: 'house_wall_front_12', type: 'wood', position: [0, 3, 6] },
+    { id: 'house_wall_front_13', type: 'wood', position: [1, 3, 6] },
+    { id: 'house_wall_front_14', type: 'wood', position: [2, 3, 6] },
+
+    // 门（双开门）
+    { id: 'house_door_left', type: 'door', position: [-0.5, 1, 6] },
+    { id: 'house_door_right', type: 'door', position: [0.5, 1, 6] },
+
+    // 左墙（带窗户）
+    { id: 'house_wall_left_0', type: 'wood', position: [-2, 1, 3] },
+    { id: 'house_wall_left_1', type: 'wood', position: [-2, 1, 4] },
+    { id: 'house_wall_left_2', type: 'wood', position: [-2, 1, 5] },
+    { id: 'house_wall_left_3', type: 'glass', position: [-2, 2, 3] }, // 窗户
+    { id: 'house_wall_left_4', type: 'wood', position: [-2, 2, 4] },
+    { id: 'house_wall_left_5', type: 'wood', position: [-2, 2, 5] },
+    { id: 'house_wall_left_6', type: 'wood', position: [-2, 3, 3] },
+    { id: 'house_wall_left_7', type: 'wood', position: [-2, 3, 4] },
+    { id: 'house_wall_left_8', type: 'wood', position: [-2, 3, 5] },
+
+    // 右墙（带窗户）
+    { id: 'house_wall_right_0', type: 'wood', position: [2, 1, 3] },
+    { id: 'house_wall_right_1', type: 'wood', position: [2, 1, 4] },
+    { id: 'house_wall_right_2', type: 'wood', position: [2, 1, 5] },
+    { id: 'house_wall_right_3', type: 'glass', position: [2, 2, 4] }, // 窗户
+    { id: 'house_wall_right_4', type: 'wood', position: [2, 2, 3] },
+    { id: 'house_wall_right_5', type: 'wood', position: [2, 2, 5] },
+    { id: 'house_wall_right_6', type: 'wood', position: [2, 3, 3] },
+    { id: 'house_wall_right_7', type: 'wood', position: [2, 3, 4] },
+    { id: 'house_wall_right_8', type: 'wood', position: [2, 3, 5] },
+
+    // 屋顶（倾斜式）
+    { id: 'house_roof_0', type: 'wood', position: [-2, 4, 2] },
+    { id: 'house_roof_1', type: 'wood', position: [-1, 4, 2] },
+    { id: 'house_roof_2', type: 'wood', position: [0, 4, 2] },
+    { id: 'house_roof_3', type: 'wood', position: [1, 4, 2] },
+    { id: 'house_roof_4', type: 'wood', position: [2, 4, 2] },
+
+    { id: 'house_roof_5', type: 'wood', position: [-2, 4, 3] },
+    { id: 'house_roof_6', type: 'wood', position: [-1, 4, 3] },
+    { id: 'house_roof_7', type: 'wood', position: [0, 4, 3] },
+    { id: 'house_roof_8', type: 'wood', position: [1, 4, 3] },
+    { id: 'house_roof_9', type: 'wood', position: [2, 4, 3] },
+
+    { id: 'house_roof_10', type: 'wood', position: [-2, 4, 4] },
+    { id: 'house_roof_11', type: 'wood', position: [-1, 4, 4] },
+    { id: 'house_roof_12', type: 'wood', position: [0, 4, 4] },
+    { id: 'house_roof_13', type: 'wood', position: [1, 4, 4] },
+    { id: 'house_roof_14', type: 'wood', position: [2, 4, 4] },
+
+    { id: 'house_roof_15', type: 'wood', position: [-2, 4, 5] },
+    { id: 'house_roof_16', type: 'wood', position: [-1, 4, 5] },
+    { id: 'house_roof_17', type: 'wood', position: [0, 4, 5] },
+    { id: 'house_roof_18', type: 'wood', position: [1, 4, 5] },
+    { id: 'house_roof_19', type: 'wood', position: [2, 4, 5] },
+
+    { id: 'house_roof_20', type: 'wood', position: [-2, 4, 6] },
+    { id: 'house_roof_21', type: 'wood', position: [-1, 4, 6] },
+    { id: 'house_roof_22', type: 'wood', position: [0, 4, 6] },
+    { id: 'house_roof_23', type: 'wood', position: [1, 4, 6] },
+    { id: 'house_roof_24', type: 'wood', position: [2, 4, 6] },
+
+    // 屋顶尖（中心一排高一格）
+    { id: 'house_roof_peak_0', type: 'wood', position: [-2, 5, 2] },
+    { id: 'house_roof_peak_1', type: 'wood', position: [2, 5, 2] },
+    { id: 'house_roof_peak_2', type: 'wood', position: [-2, 5, 6] },
+    { id: 'house_roof_peak_3', type: 'wood', position: [2, 5, 6] }
   ])
 
-  // 世界方块系统（地下层、矿石）
-  const [worldBlocks, setWorldBlocks] = useState<Map<string, { type: string, position: [number, number, number] }>>(new Map())
+  // 动物系统
+  const [animals, setAnimals] = useState<PlacedAnimal[]>([]) // 已放置的动物
+  const [placingAnimal, setPlacingAnimal] = useState<string | null>(null) // 当前正在放置的动物ID
 
   // 视角和玩家相关状态
   const [cameraMode, setCameraMode] = useState<'first' | 'third'>('first')
@@ -904,56 +384,89 @@ function FarmScene3D() {
     limbs: '#2d5a8a'
   })
 
+  /**
+   * 快捷栏槽位选择
+   * 根据槽位中的物品类型自动决定行为
+   * - 工具：提示可以用于对应操作
+   * - 种子：切换到该种子
+   * - 方块：提示可以用于建造
+   */
+  const handleHotbarSlotSelect = (index: number) => {
+    setSelectedHotbarSlot(index)
+    const stack = hotbarSlots[index]
+
+    if (isEmpty(stack)) {
+      setMessage('❌ 该槽位为空')
+      return
+    }
+
+    // 根据物品类型显示不同提示
+    if (stack.itemType === 'tool' && stack.toolType) {
+      const toolNames: Record<string, string> = {
+        hoe: '锄头',
+        watering_can: '水壶',
+        sickle: '镰刀'
+      }
+      const toolName = toolNames[stack.toolType] || stack.name
+      setMessage(`✅ 切换到：${toolName}`)
+    } else if (stack.cropType) {
+      setSelectedSeed(stack.cropType)
+      const cropConfig = getCropConfig(stack.cropType)
+      setMessage(`✅ 切换到种子：${cropConfig.name}（${cropConfig.growTime}秒成熟）`)
+    } else if (stack.itemType === 'block') {
+      setMessage(`✅ 切换到：${stack.name}（按F进入建造模式后放置）`)
+    } else {
+      setMessage(`✅ 切换到：${stack.name}`)
+    }
+  }
+
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      // 工具切换快捷键 (1-4)
-      if (e.code === 'Digit1') {
-        setCurrentTool('hoe')
-        setMessage('🪓 切换到：锄头')
-      } else if (e.code === 'Digit2') {
-        setCurrentTool('water')
-        setMessage('💧 切换到：水壶')
-      } else if (e.code === 'Digit3') {
-        setCurrentTool('seed')
-        setMessage('🌱 切换到：种子')
-      } else if (e.code === 'Digit4') {
-        setCurrentTool('harvest')
-        setMessage('🌾 切换到：镰刀')
-      } else if (e.code === 'KeyF') {
+      // 快捷栏数字键 1-8 - 统一处理
+      if (e.code >= 'Digit1' && e.code <= 'Digit8') {
+        const index = parseInt(e.code.replace('Digit', '')) - 1 // 转换为 0-7
+        handleHotbarSlotSelect(index)
+        e.preventDefault()
+        return
+      }
+
+      if (e.code === 'KeyF') {
         // 切换建造模式
-        setBuildMode(prev => !prev)
-        setMessage(prev ? '🔨 退出建造模式' : '🔨 进入建造模式')
-      } else if (e.code === 'Digit5') {
-        // 选择木头
-        setSelectedMaterial('wood')
-        setMessage('🪵 切换材料：木头')
-      } else if (e.code === 'Digit6') {
-        // 选择石头
-        setSelectedMaterial('stone')
-        setMessage('🪨 切换材料：石头')
-      } else if (e.code === 'Digit7') {
-        // 选择泥土
-        setSelectedMaterial('dirt')
-        setMessage('🟫 切换材料：泥土')
+        setBuildMode((prev) => !prev)
+        setMessage((prev) => (prev ? '🔨 退出建造模式' : '🔨 进入建造模式'))
       } else if (e.code === 'KeyV') {
         // 视角切换
-        setCameraMode(prev => {
+        setCameraMode((prev) => {
           const newMode = prev === 'first' ? 'third' : 'first'
           setMessage(newMode === 'first' ? '📷 切换到第一人称' : '📷 切换到第三人称')
           return newMode
         })
       } else if (e.code === 'KeyC') {
         // 打开/关闭颜色设置面板
-        setShowColorPanel(prev => !prev)
+        setShowColorPanel((prev) => !prev)
       } else if (e.code === 'KeyB') {
         // 打开/关闭背包
-        setShowInventory(prev => !prev)
+        setShowInventory((prev) => !prev)
       } else if (e.code === 'KeyU') {
         // 打开/关闭商店
-        setShowShop(prev => !prev)
+        setShowShop((prev) => !prev)
+      } else if (e.code === 'KeyT') {
+        // 测试：放置动物（临时）
+        if (placingAnimal) {
+          setPlacingAnimal(null)
+          setMessage('❌ 取消放置动物')
+        } else {
+          setPlacingAnimal('pig') // 默认放置猪
+          const config = ANIMAL_CONFIGS['pig']
+          setMessage(`🐷 放置模式：${config.name}（左键放置，右键取消）`)
+        }
       } else if (e.code === 'Escape') {
         // ESC 键：关闭面板并显示暂停菜单
-        if (showColorPanel) {
+        if (placingAnimal) {
+          // 退出动物放置模式
+          setPlacingAnimal(null)
+          setMessage('❌ 取消放置动物')
+        } else if (showColorPanel) {
           setShowColorPanel(false)
         } else if (showInventory) {
           setShowInventory(false)
@@ -970,33 +483,18 @@ function FarmScene3D() {
     return () => {
       document.removeEventListener('keydown', handleKeyDown)
     }
-  }, [showColorPanel, showInventory, playerPosition, droppedItems])
+  }, [showColorPanel, showInventory, showShop, showPauseMenu, cameraMode, hotbarSlots, selectedSeed, selectedHotbarSlot, buildMode])
 
-  // 监听颜色面板状态变化，自动解锁/锁定指针
+  // 监听面板状态变化，自动解锁指针
   useEffect(() => {
-    if (showColorPanel) {
-      // 打开面板时解锁指针
+    if (showColorPanel || showInventory || showShop) {
       document.exitPointerLock()
     }
-  }, [showColorPanel])
-
-  // 监听背包面板状态变化，自动解锁/锁定指针
-  useEffect(() => {
-    if (showInventory) {
-      document.exitPointerLock()
-    }
-  }, [showInventory])
-
-  // 监听商店面板状态变化，自动解锁/锁定指针
-  useEffect(() => {
-    if (showShop) {
-      document.exitPointerLock()
-    }
-  }, [showShop])
+  }, [showColorPanel, showInventory, showShop])
 
   // 自动拾取物品（检测玩家与掉落物品的距离）
   useEffect(() => {
-    const pickupDistance = 1.5  // 自动拾取距离
+    const pickupDistance = 1.5 // 自动拾取距离
 
     droppedItems.forEach((item) => {
       const dx = item.position[0] - playerPosition[0]
@@ -1004,37 +502,42 @@ function FarmScene3D() {
       const distance = Math.sqrt(dx * dx + dz * dz)
 
       if (distance < pickupDistance) {
-        // 自动捡起物品
-        setInventory(prev => ({
-          ...prev,
-          carrot: prev.carrot + item.count
-        }))
-        setMessage(`✅ 自动捡起了 ${item.count} 根胡萝卜`)
+        // 使用新的背包系统添加物品
+        addItemToInventory(item.type, item.count)
+
+        // 物品名称映射
+        const itemNames: Record<string, string> = {
+          carrot: '胡萝卜',
+          dirt: '泥土',
+          stone: '石头',
+          coal: '煤矿',
+          iron_ore: '铁矿',
+          gold_ore: '金矿',
+          diamond: '钻石',
+          egg: '鸡蛋',
+          milk: '牛奶',
+          wool: '羊毛',
+          meat: '肉类',
+          apple: '苹果',
+          orange: '橙子',
+          peach: '桃子',
+          cherry: '樱桃',
+          pear: '梨'
+        }
+
+        const itemName = itemNames[item.type] || item.type
+        setMessage(`✅ 自动捡起了 ${item.count} 个${itemName}`)
 
         // 从掉落列表中移除
-        setDroppedItems(prev => prev.filter(i => i.id !== item.id))
+        setDroppedItems((prev) => prev.filter((i) => i.id !== item.id))
       }
     })
   }, [playerPosition, droppedItems])
 
-  // 出售物品
-  const sellItem = (type: 'carrot', count: number) => {
-    const prices = { carrot: 10 }
-
-    if (inventory[type] >= count) {
-      setInventory(prev => ({
-        ...prev,
-        [type]: prev[type] - count
-      }))
-      setGold(prev => prev + count * prices[type])
-      setMessage(`💰 出售了 ${count} 根胡萝卜，获得 ${count * prices[type]} 金币`)
-    }
-  }
-
   // 丢掉物品
   const dropItem = (type: 'carrot', count: number) => {
     if (inventory[type] >= count) {
-      setInventory(prev => ({
+      setInventory((prev) => ({
         ...prev,
         [type]: prev[type] - count
       }))
@@ -1047,16 +550,63 @@ function FarmScene3D() {
         count: count
       }
 
-      setDroppedItems(prev => [...prev, newItem])
+      setDroppedItems((prev) => [...prev, newItem])
       setMessage(`📤 丢掉了 ${count} 根胡萝卜`)
     }
   }
 
   // 树木砍伐处理
   const handleTreeChop = () => {
-    const woodAmount = Math.floor(Math.random() * 3) + 3  // 3-5个木材
-    setInventory(prev => ({ ...prev, wood: prev.wood + woodAmount }))
+    const woodAmount = Math.floor(Math.random() * 3) + 3 // 3-5个木材
+    setInventory((prev) => ({ ...prev, wood: prev.wood + woodAmount }))
     setMessage(`🪓 砍伐成功！获得 ${woodAmount} 个木材`)
+  }
+
+  // 处理方块挖掘
+  const handleBlockMined = (position: [number, number, number], blockType: string, dropItem: string | null) => {
+    const [x, y, z] = position
+    const blockKey = `${x},${y},${z}`
+
+    console.log('📦 Block mined:', { position, blockType, dropItem, blockKey })
+
+    // 添加到已挖掘列表
+    setMinedBlocks((prev) => new Set([...prev, blockKey]))
+
+    // 处理掉落物品
+    if (dropItem) {
+      console.log('💎 Creating dropped item:', dropItem)
+
+      // 在玩家前方创建掉落物品（稍微向上抛起）
+      const dropPosition: [number, number, number] = [
+        playerPosition[0],
+        0.5, // 在地面上方
+        playerPosition[2]
+      ]
+
+      const newItem = {
+        id: `${dropItem}_${Date.now()}_${Math.random()}`,
+        type: dropItem as any,
+        position: dropPosition,
+        count: 1
+      }
+
+      setDroppedItems((prev) => [...prev, newItem])
+
+      console.log('✅ Dropped item created:', { type: dropItem, position: dropPosition })
+
+      // 显示消息
+      const itemNames: Record<string, string> = {
+        dirt: '泥土',
+        stone: '石头',
+        coal: '煤矿',
+        iron_ore: '铁矿',
+        gold_ore: '金矿',
+        diamond: '钻石'
+      }
+
+      const itemName = itemNames[dropItem] || dropItem
+      setMessage(`⛏️ 挖掘获得 ${itemName}（已掉落在地上）`)
+    }
   }
 
   // 放置方块
@@ -1071,18 +621,18 @@ function FarmScene3D() {
 
     // 对齐到网格
     const alignedX = Math.round(x)
-    const alignedY = Math.max(0, Math.round(y))  // 至少在地面上
+    const alignedY = Math.max(0, Math.round(y)) // 至少在地面上
     const alignedZ = Math.round(z)
 
     // 检查该位置是否已有方块
     const posKey = `${alignedX},${alignedY},${alignedZ}`
-    if (placedBlocks.some(b => b.id === posKey)) {
+    if (placedBlocks.some((b) => b.id === posKey)) {
       setMessage('❌ 该位置已有方块！')
       return
     }
 
     // 扣除材料
-    setInventory(prev => ({ ...prev, [selectedMaterial]: prev[selectedMaterial] - 1 }))
+    setInventory((prev) => ({ ...prev, [selectedMaterial]: prev[selectedMaterial] - 1 }))
 
     // 添加方块
     const newBlock = {
@@ -1091,13 +641,13 @@ function FarmScene3D() {
       position: [alignedX, alignedY, alignedZ] as [number, number, number]
     }
 
-    setPlacedBlocks(prev => [...prev, newBlock])
+    setPlacedBlocks((prev) => [...prev, newBlock])
     setMessage(`✅ 放置了 ${selectedMaterial} 方块`)
   }
 
   // 移除方块
   const handleRemoveBlock = (blockId: string) => {
-    const block = placedBlocks.find(b => b.id === blockId)
+    const block = placedBlocks.find((b) => b.id === blockId)
     if (!block) return
 
     // 检查是否是房屋的一部分（保护初始房屋）
@@ -1107,16 +657,173 @@ function FarmScene3D() {
     }
 
     // 返还材料
-    setInventory(prev => ({ ...prev, [block.type]: prev[block.type] + 1 }))
+    setInventory((prev) => ({ ...prev, [block.type]: prev[block.type] + 1 }))
 
     // 移除方块
-    setPlacedBlocks(prev => prev.filter(b => b.id !== blockId))
+    setPlacedBlocks((prev) => prev.filter((b) => b.id !== blockId))
     setMessage(`✅ 拆除了 ${block.type} 方块`)
   }
 
+  // ===== 动物系统 =====
+
+  // 放置动物
+  const handlePlaceAnimal = (position: [number, number, number], animalTypeOverride?: string) => {
+    // 使用传入的动物类型，或使用当前正在放置的动物类型
+    const animalType = animalTypeOverride || placingAnimal
+    if (!animalType) return
+
+    const config = ANIMAL_CONFIGS[animalType]
+    const currentTime = Date.now()
+
+    // 创建新动物实例
+    const newAnimal: PlacedAnimal = {
+      id: `${animalType}_${currentTime}_${Math.random().toString(36).slice(2, 9)}`,
+      animalId: animalType,
+      position: position,
+      rotation: 0,
+      birthTime: currentTime,
+      growthStage: 'baby',
+      lastFed: currentTime,
+      lastProduct: currentTime,
+      hunger: 0,
+      happiness: 100,
+      health: 100
+    }
+
+    setAnimals((prev) => [...prev, newAnimal])
+    setPlacingAnimal(null)
+    setMessage(`✅ 放置了${config.name}幼崽`)
+  }
+
+  // 收起动物
+  const handleRemoveAnimal = (animal: PlacedAnimal) => {
+    const config = ANIMAL_CONFIGS[animal.animalId]
+
+    // 从动物列表中移除
+    setAnimals((prev) => prev.filter((a) => a.id !== animal.id))
+
+    // 返还到背包（保留状态）
+    addItemToInventory(animal.animalId, 1)
+
+    const stageText = animal.growthStage === 'baby' ? '幼崽' : animal.growthStage === 'growing' ? '成长中' : '成年'
+    setMessage(`✅ 已收起${config.name}（${stageText}）`)
+  }
+
+  // 动物生长系统（定时器）
+  useEffect(() => {
+    const growthInterval = setInterval(() => {
+      setAnimals((prev) => {
+        let hasChanges = false
+        const currentTime = Date.now()
+
+        const updated = prev.map((animal) => {
+          const config = ANIMAL_CONFIGS[animal.animalId]
+          let newAnimal = { ...animal }
+
+          // 1. 检查生长阶段升级
+          if (shouldUpgradeGrowthStage(animal)) {
+            if (animal.growthStage === 'baby') {
+              newAnimal.growthStage = 'growing'
+              setMessage(`🎉 ${config.name}长大了！`)
+              hasChanges = true
+            } else if (animal.growthStage === 'growing') {
+              newAnimal.growthStage = 'adult'
+              setMessage(`🎉 ${config.name}成年了！`)
+              hasChanges = true
+            }
+          }
+
+          // 2. 检查饥饿
+          if (isAnimalHungry(animal)) {
+            const hungerDamage = config.needs.hungerDamage
+            newAnimal.hunger = Math.min(100, animal.hunger + hungerDamage)
+            newAnimal.health = Math.max(0, animal.health - hungerDamage)
+
+            if (newAnimal.health <= 0 && animal.health > 0) {
+              // 动物饿死
+              setMessage(`💔 ${config.name}饿死了...`)
+              hasChanges = true
+            } else if (animal.hunger < 30) {
+              // 饥饿警告
+              hasChanges = true
+            }
+          }
+
+          // 3. 成年动物产出检查
+          if (animal.growthStage === 'adult' && canAnimalProduce(animal)) {
+            const product = config.product
+            if (product.type && product.type !== 'meat') {
+              // 掉落产品
+              const droppedItem = {
+                id: `product_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`,
+                type: product.type as any,
+                position: [animal.position[0], 0, animal.position[2]] as [number, number, number],
+                count: product.amount
+              }
+
+              setDroppedItems((prevItems) => [...prevItems, droppedItem])
+              newAnimal.lastProduct = currentTime
+              setMessage(`🎁 ${config.name}产出了${product.type === 'egg' ? '鸡蛋' : product.type === 'milk' ? '牛奶' : '羊毛'}！`)
+              hasChanges = true
+            }
+          }
+
+          return newAnimal
+        })
+
+        // 移除死亡的动物
+        const alive = updated.filter((a) => a.health > 0)
+
+        return hasChanges || alive.length !== prev.length ? alive : prev
+      })
+    }, 1000) // 每秒检查一次
+
+    return () => clearInterval(growthInterval)
+  }, [])
+
+  // 树木生长和成熟检测（每2秒检查一次）
+  useEffect(() => {
+    const treeCheckInterval = setInterval(() => {
+      setPlots((prevPlots) => {
+        const newPlots = new Map(prevPlots)
+        let hasChanges = false
+
+        newPlots.forEach((plot, posKey) => {
+          // 只检查树木状态
+          if (plot.state === 'tree' && plot.treeType && plot.plantTime) {
+            const isReady = isTreeReady({
+              treeType: plot.treeType,
+              plantTime: plot.plantTime,
+              lastHarvestTime: plot.lastHarvestTime
+            })
+
+            if (isReady) {
+              plot.state = 'tree_ready'
+              newPlots.set(posKey, plot)
+              hasChanges = true
+
+              const treeConfig = getTreeConfig(plot.treeType)
+              setMessage(`🌳 ${treeConfig.name}成熟了！点击收获水果`)
+            }
+          }
+        })
+
+        return hasChanges ? newPlots : prevPlots
+      })
+    }, 2000) // 每2秒检查一次
+
+    return () => clearInterval(treeCheckInterval)
+  }, [])
+  // 动物右键交互
+  const handleAnimalRightClick = (animal: PlacedAnimal) => {
+    // TODO: 打开动物交互面板（后续实现）
+    // 现在先简单处理：直接收起
+    handleRemoveAnimal(animal)
+  }
+
   // 购买材料
-  const buyMaterial = (type: 'wood' | 'stone' | 'dirt', count: number) => {
-    const prices = { wood: 5, stone: 8, dirt: 3 }
+  const buyMaterial = (type: 'wood' | 'stone' | 'dirt' | 'glass' | 'door' | 'planks', count: number) => {
+    const prices = { wood: 5, stone: 8, dirt: 3, glass: 15, door: 20, planks: 6 }
     const cost = count * prices[type]
 
     if (gold < cost) {
@@ -1124,18 +831,404 @@ function FarmScene3D() {
       return
     }
 
-    setGold(prev => prev - cost)
-    setInventory(prev => ({ ...prev, [type]: prev[type] + count }))
+    setGold((prev) => prev - cost)
+    setInventory((prev) => ({ ...prev, [type]: prev[type] + count }))
+
+    // 同时添加到新背包系统
+    addItemToInventory(type, count)
+
     setMessage(`✅ 购买了 ${count} 个 ${type}，花费 ${cost} 金币`)
+  }
+
+  // 购买其他物品（种子、工具、机器等）
+  const buyItem = (itemId: string, count: number) => {
+    import('../config/ShopConfig').then(({ BUYABLE_ITEMS }) => {
+      const item = BUYABLE_ITEMS.find(i => i.id === itemId)
+
+      if (!item) {
+        setMessage('❌ 商品不存在！')
+        return
+      }
+
+      const totalCost = item.price * count
+
+      if (gold < totalCost) {
+        setMessage('❌ 金币不足！')
+        return
+      }
+
+      // 扣除金币
+      setGold((prev) => prev - totalCost)
+
+      // 根据商品类型添加到背包
+      if (item.category === 'crops') {
+        // 作物：可以直接种植
+        addItemToInventory(itemId, count)
+        setMessage(`✅ 购买了 ${count} 个 ${item.name}，花费 ${totalCost} 金币`)
+      } else if (item.category === 'tools') {
+        // 工具：提取toolType（去掉tool_前缀）
+        const toolType = itemId.replace('tool_', '') as ToolType
+        // 对于wood系列工具，还需要去掉_wood后缀
+        const finalToolType = toolType.replace('_wood', '') as ToolType
+        console.log('购买工具:', itemId, '->', finalToolType)
+        addItemToInventory(finalToolType, 1)
+        setMessage(`✅ 购买了 ${item.name}，花费 ${totalCost} 金币`)
+      } else if (item.category === 'machines') {
+        // 机器：作为物品添加
+        console.log('购买机器:', itemId)
+        addItemToInventory(itemId as any, count)
+        setMessage(`✅ 购买了 ${item.name}，花费 ${totalCost} 金币`)
+      } else if (item.category === 'decorations') {
+        // 装饰品：直接使用itemId
+        console.log('购买装饰品:', itemId)
+        addItemToInventory(itemId as DecorationType, count)
+        setMessage(`✅ 购买了 ${count} 个 ${item.name}，花费 ${totalCost} 金币`)
+      } else if (item.category === 'animals') {
+        // 动物和设施：直接使用itemId
+        console.log('购买动物/设施:', itemId)
+        addItemToInventory(itemId as any, count)
+        setMessage(`✅ 购买了 ${count} 个 ${item.name}，花费 ${totalCost} 金币`)
+      } else if (item.category === 'special') {
+        // 特殊物品：直接使用itemId
+        console.log('购买特殊物品:', itemId)
+        addItemToInventory(itemId as SpecialType, count)
+        setMessage(`✅ 购买了 ${count} 个 ${item.name}，花费 ${totalCost} 金币`)
+      } else {
+        // 其他物品（材料等）
+        console.log('购买其他:', itemId)
+        addItemToInventory(itemId as any, count)
+        setMessage(`✅ 购买了 ${count} 个 ${item.name}，花费 ${totalCost} 金币`)
+      }
+    })
+  }
+
+  // 出售物品给商店（商店界面调用）
+  const sellItem = (itemId: string, count: number) => {
+    // 动态导入配置（保持兼容性）
+    import('../config/ShopConfig').then(({ SELLABLE_ITEMS }) => {
+      const item = SELLABLE_ITEMS.find(i => i.id === itemId)
+
+      if (!item) {
+        setMessage('❌ 商品不存在！')
+        return
+      }
+
+      // 从 itemId 中解析物品类型
+      // 例如: 'crop_carrot' -> itemType: 'crop', subType: 'carrot'
+      const parts = itemId.split('_')
+      const itemType = parts[0] // 'crop', 'fruit', 'product', 'mineral'
+      const subType = parts[1] // 'carrot', 'apple', 'egg', 'gold'
+
+      // 在背包中查找并移除物品
+      let remainingCount = count
+      const slotsToRemove: number[] = []
+
+      // 遍历所有背包槽位（快捷栏+背包）
+      for (let i = 0; i < inventorySlots.length && remainingCount > 0; i++) {
+        const stack = inventorySlots[i]
+        if (!stack || stack.count === 0) continue
+
+        // 根据物品类型匹配
+        let isMatch = false
+        if (itemType === 'crop' && stack.itemType === 'crop' && stack.cropType === subType) {
+          isMatch = true
+        } else if (itemType === 'fruit' && (stack as any).treeType === subType) {
+          isMatch = true
+        } else if (itemType === 'product' && (stack as any).productType === subType) {
+          isMatch = true
+        } else if (itemType === 'mineral' && (stack as any).mineralType === subType) {
+          isMatch = true
+        }
+
+        if (isMatch) {
+          const toRemove = Math.min(stack.count, remainingCount)
+          remainingCount -= toRemove
+
+          // 更新槽位
+          const newCount = stack.count - toRemove
+          if (newCount === 0) {
+            slotsToRemove.push(i)
+          } else {
+            setInventorySlots((prev) => {
+              const newSlots = [...prev]
+              newSlots[i] = { ...stack, count: newCount }
+              return newSlots
+            })
+          }
+        }
+      }
+
+      // 清理空槽位
+      if (slotsToRemove.length > 0) {
+        setInventorySlots((prev) => {
+          const newSlots = [...prev]
+          slotsToRemove.forEach(idx => {
+            newSlots[idx] = createEmptyStack()
+            newSlots[idx].id = ''
+          })
+          return newSlots
+        })
+      }
+
+      // 如果没有足够的物品
+      if (remainingCount > 0) {
+        setMessage(`❌ 背包中只有 ${count - remainingCount} 个${item.name}`)
+        return
+      }
+
+      // 增加金币
+      const earnings = item.price * count
+      setGold((prev) => prev + earnings)
+      setMessage(`💰 出售了 ${count} 个 ${item.name}，获得 ${earnings} 金币`)
+    })
+  }
+
+  // ===== 新背包系统处理函数 =====
+
+  /**
+   * 添加物品到背包（优先快捷栏，再背包）
+   * 使用单一状态更新，避免批处理冲突
+   */
+  const addItemToInventory = (
+    type: BlockType | CropType | ToolType | DecorationType | MachineType | AnimalType | SpecialType | FacilityType | AnimalProductType | TreeType | string,
+    count: number
+  ) => {
+    const newStack = createStack(type as any, count)
+    if (!newStack) {
+      console.error('创建物品堆叠失败:', type)
+      return
+    }
+
+    // 使用单一状态更新，一次性处理所有逻辑
+    setInventorySlots((prev) => {
+      const newSlots = [...prev]
+      let remainingCount = count
+
+      // 1. 先尝试堆叠到快捷栏（背包前8个槽位）
+      for (let i = 0; i < 8 && remainingCount > 0; i++) {
+        if (canStack(newSlots[i], newStack)) {
+          const merged = mergeStacks(newSlots[i], newStack)
+          if (merged) {
+            const canAdd = Math.min(remainingCount, merged.maxStack - newSlots[i].count)
+            newSlots[i] = { ...newSlots[i], count: newSlots[i].count + canAdd }
+            remainingCount -= canAdd
+          }
+        }
+      }
+
+      // 2. 剩余的尝试放入背包其他槽位
+      for (let i = 8; i < newSlots.length && remainingCount > 0; i++) {
+        if (isEmpty(newSlots[i])) {
+          const stack = createStack(type as any, Math.min(remainingCount, 64))
+          if (stack) {
+            newSlots[i] = stack
+            remainingCount -= stack.count
+          }
+        } else if (canStack(newSlots[i], newStack)) {
+          const merged = mergeStacks(newSlots[i], newStack)
+          if (merged) {
+            const canAdd = Math.min(remainingCount, merged.maxStack - newSlots[i].count)
+            newSlots[i] = { ...newSlots[i], count: newSlots[i].count + canAdd }
+            remainingCount -= canAdd
+          }
+        }
+      }
+
+      return newSlots
+    })
+  }
+
+  /**
+   * 移动物品（拖拽）
+   */
+  const handleMoveItem = (
+    fromIndex: number,
+    toIndex: number,
+    fromHotbar: boolean,
+    toHotbar: boolean
+  ) => {
+    // 快捷栏就是背包的前8个槽位
+    const fromSlot = inventorySlots[fromIndex]
+    const toSlot = inventorySlots[toIndex]
+
+    if (isEmpty(fromSlot)) return
+
+    // 如果目标槽位为空，直接移动
+    if (isEmpty(toSlot)) {
+      setInventorySlots((prev) => {
+        const newSlots = [...prev]
+        newSlots[toIndex] = fromSlot
+        newSlots[fromIndex] = createEmptyStack()
+        newSlots[fromIndex].id = ''
+        return newSlots
+      })
+      return
+    }
+
+    // 如果可以堆叠，合并
+    if (canStack(fromSlot, toSlot)) {
+      const merged = mergeStacks(fromSlot, toSlot)
+      if (merged) {
+        setInventorySlots((prev) => {
+          const newSlots = [...prev]
+          newSlots[toIndex] = merged
+          newSlots[fromIndex] = createEmptyStack()
+          newSlots[fromIndex].id = ''
+          return newSlots
+        })
+        return
+      }
+    }
+
+    // 交换位置
+    setInventorySlots((prev) => {
+      const newSlots = [...prev]
+      const temp = newSlots[fromIndex]
+      newSlots[fromIndex] = newSlots[toIndex]
+      newSlots[toIndex] = temp
+      return newSlots
+    })
+  }
+
+  /**
+   * 出售物品（背包右键点击）
+   */
+  const handleSellItemFromNewInventory = (slotIndex: number, isHotbar: boolean, count: number) => {
+    const slots = isHotbar ? hotbarSlots : inventorySlots
+    const stack = slots[slotIndex]
+
+    if (isEmpty(stack)) return
+
+    // 动态导入配置
+    import('../config/ShopConfig').then(({ SELLABLE_ITEMS }) => {
+      // 根据物品类型生成 itemId
+      let itemId: string | null = null
+      let itemName: string = '物品'
+
+      // 作物
+      if (stack.itemType === 'crop' && stack.cropType) {
+        itemId = `crop_${stack.cropType}`
+        itemName = { carrot: '胡萝卜', wheat: '小麦', potato: '土豆', tomato: '番茄', pumpkin: '南瓜' }[stack.cropType] || stack.cropType
+      }
+      // 水果
+      else if ((stack as any).treeType) {
+        itemId = `fruit_${(stack as any).treeType}`
+        itemName = { apple: '苹果', orange: '橙子', peach: '桃子', cherry: '樱桃', pear: '梨' }[(stack as any).treeType] || (stack as any).treeType
+      }
+      // 动物产品
+      else if ((stack as any).productType) {
+        itemId = `product_${(stack as any).productType}`
+        itemName = { egg: '鸡蛋', milk: '牛奶', wool: '羊毛', meat: '肉类' }[(stack as any).productType] || (stack as any).productType
+      }
+      // 矿物
+      else if ((stack as any).mineralType) {
+        itemId = `mineral_${(stack as any).mineralType}`
+        itemName = { gold: '金矿', silver: '银矿', iron: '铁矿' }[(stack as any).mineralType] || (stack as any).mineralType
+      }
+
+      // 如果不是可出售的物品
+      if (!itemId) {
+        setMessage('❌ 该物品不可出售')
+        return
+      }
+
+      // 查找配置
+      const item = SELLABLE_ITEMS.find(i => i.id === itemId)
+      if (!item) {
+        setMessage(`❌ ${itemName}不可出售`)
+        return
+      }
+
+      const price = item.price
+      const totalMoney = price * count
+
+      // 增加金币
+      setGold((prev) => prev + totalMoney)
+
+      // 减少数量（快捷栏就是背包前8个槽位）
+      setInventorySlots((prev) => {
+        const newSlots = [...prev]
+        const newCount = Math.max(0, newSlots[slotIndex].count - count)
+        newSlots[slotIndex] = { ...newSlots[slotIndex], count: newCount }
+        if (newCount === 0) {
+          newSlots[slotIndex] = createEmptyStack()
+          newSlots[slotIndex].id = ''
+        }
+        return newSlots
+      })
+
+      setMessage(`💰 出售了 ${count} 个${itemName}，获得 ${totalMoney} 金币`)
+    })
+  }
+
+  /**
+   * 使用物品
+   */
+  const handleUseItem = (slotIndex: number, isHotbar: boolean) => {
+    const slots = isHotbar ? hotbarSlots : inventorySlots
+    const stack = slots[slotIndex]
+
+    if (isEmpty(stack)) return
+
+    // 如果是工具，切换当前工具
+    if (stack.itemType === 'tool' && stack.toolType) {
+      setSelectedHotbarSlot(isHotbar ? slotIndex : selectedHotbarSlot)
+      setMessage(`✅ 切换到 ${stack.name}`)
+    }
   }
 
   // 处理地块点击（使用射线检测）
   const handlePlotClick = (clickPosition: [number, number, number]) => {
     const [x, y, z] = clickPosition
 
+    // 如果正在放置动物
+    if (placingAnimal) {
+      handlePlaceAnimal([x, y, z])
+      return
+    }
+
     // 如果在建造模式，放置方块
     if (buildMode) {
       handlePlaceBlock([x, y, z])
+      return
+    }
+
+    // 获取当前选中的快捷栏槽位物品
+    const selectedItem = hotbarSlots[selectedHotbarSlot]
+
+    // 检查选中的是否是可放置的动物
+    if (selectedItem.itemType === 'animal' && (selectedItem as any).animalType) {
+      const animalItem = (selectedItem as any).animalType as string
+      // 只有实际的动物可以放置（排除饲料、干草、设施）
+      const placeableAnimals = ['animal_chicken', 'animal_cow', 'animal_sheep', 'animal_pig']
+
+      if (placeableAnimals.includes(animalItem)) {
+        // 去掉 'animal_' 前缀得到基础类型
+        const baseAnimalType = animalItem.replace('animal_', '')
+        // 放置动物
+        handlePlaceAnimal([x, y, z], baseAnimalType)
+
+        // 消耗1个动物（快捷栏就是背包前8个槽位）
+        setInventorySlots((prev) => {
+          const newSlots = [...prev]
+          if (newSlots[selectedHotbarSlot].count > 1) {
+            newSlots[selectedHotbarSlot] = {
+              ...newSlots[selectedHotbarSlot],
+              count: newSlots[selectedHotbarSlot].count - 1
+            }
+          } else {
+            newSlots[selectedHotbarSlot] = createEmptyStack()
+            newSlots[selectedHotbarSlot].id = ''
+          }
+          return newSlots
+        })
+        return
+      }
+    }
+
+    // 检查是否有选中物品
+    if (isEmpty(selectedItem)) {
+      setMessage('❌ 请先在快捷栏选择一个工具、种子或动物（按1-8）')
       return
     }
 
@@ -1149,99 +1242,177 @@ function FarmScene3D() {
     const newPlots = new Map(plots)
     const plot = newPlots.get(posKey)
 
-    switch (currentTool) {
-      case 'hoe':
-        if (!plot) {
-          // 创建新地块
-          newPlots.set(posKey, {
-            state: 'tilled',
-            position: [alignedX, -0.1, alignedZ]  // 凹陷：y = -0.1
-          })
-          setMessage('✅ 土地已开垦')
-        } else if (plot.state === 'empty') {
-          plot.state = 'tilled'
-          plot.position[1] = -0.1  // 凹陷
-          newPlots.set(posKey, plot)
-          setMessage('✅ 土地已开垦')
-        }
-        break
-      case 'water':
-        if (plot && (plot.state === 'tilled' || plot.state === 'planted')) {
-          plot.state = plot.state === 'tilled' ? 'watered' : 'planted'
-          newPlots.set(posKey, plot)
-          setMessage('✅ 土地已浇水')
-        }
-        break
-      case 'seed':
-        if (plot && (plot.state === 'tilled' || plot.state === 'watered')) {
-          plot.state = 'planted'
-          newPlots.set(posKey, plot)
-          setMessage('✅ 已播种，10秒后成熟')
-          setTimeout(() => {
-            setPlots((prev) => {
-              const updated = new Map(prev)
-              const p = updated.get(posKey)
-              if (p && p.state === 'planted') {
-                p.state = 'ready'
-                updated.set(posKey, p)
-              }
-              return updated
-            })
-            setMessage('🎉 作物成熟了！快来收获！')
-          }, 10000)
-        }
-        break
-      case 'harvest':
-        if (plot) {
-          if (plot.state === 'ready') {
-            // 收获：生成掉落物（每块地4根胡萝卜）
-            const droppedItem = {
-              id: Date.now().toString(),
-              type: 'carrot' as const,
-              position: [plot.position[0], 0, plot.position[2]] as [number, number, number],
-              count: 4  // 每块地4根胡萝卜
-            }
+    // 根据选中槽位的物品类型决定行为
+    if (selectedItem.itemType === 'tool' && selectedItem.toolType === 'hoe') {
+      // 锄头：开垦土地
+      if (!plot) {
+        // 创建新地块
+        const grassBlockKey = `${alignedX},0,${alignedZ}`
+        setMinedBlocks((prev) => new Set([...prev, grassBlockKey]))
 
-            setDroppedItems(prev => [...prev, droppedItem])
-            plot.state = 'tilled'
-            newPlots.set(posKey, plot)
-            setMessage('🥕 收获成功！4根胡萝卜掉在地上')
-          } else if (plot.state === 'planted') {
-            setMessage('⚠️ 作物还没成熟')
-          }
+        newPlots.set(posKey, {
+          state: 'tilled',
+          position: [alignedX, -0.95, alignedZ]
+        })
+        setMessage('✅ 土地已开垦')
+      } else if (plot.state === 'empty') {
+        const grassBlockKey = `${alignedX},0,${alignedZ}`
+        setMinedBlocks((prev) => new Set([...prev, grassBlockKey]))
+
+        plot.state = 'tilled'
+        plot.position[1] = -0.95
+        newPlots.set(posKey, plot)
+        setMessage('✅ 土地已开垦')
+      }
+    } else if (selectedItem.itemType === 'tool' && selectedItem.toolType === 'watering_can') {
+      // 水壶：浇水
+      if (plot && (plot.state === 'tilled' || plot.state === 'planted')) {
+        plot.state = plot.state === 'tilled' ? 'watered' : 'planted'
+        newPlots.set(posKey, plot)
+        setMessage('✅ 土地已浇水')
+      } else if (!plot) {
+        setMessage('⚠️ 这里没有耕地，不能浇水')
+      }
+    } else if (selectedItem.cropType) {
+      // 种子：播种
+      if (plot && (plot.state === 'tilled' || plot.state === 'watered')) {
+        // 检查作物是否已解锁
+        if (!unlockedCrops.includes(selectedItem.cropType)) {
+          setMessage(`⚠️ 该作物尚未解锁！请先收获其他作物来解锁新种子`)
+          return
         }
-        break
+
+        const cropConfig = getCropConfig(selectedItem.cropType)
+        plot.state = 'planted'
+        plot.cropType = selectedItem.cropType
+        plot.plantTime = Date.now()
+        newPlots.set(posKey, plot)
+        const realSeconds = cropConfig.growTime * 12 * 60 // 游戏天数转秒数
+        setMessage(`✅ 已播种${cropConfig.name}，${cropConfig.growTime}游戏天后成熟（${realSeconds}秒）`)
+
+        // 消耗1个种子（快捷栏就是背包前8个槽位）
+        setInventorySlots((prev) => {
+          const newSlots = [...prev]
+          if (newSlots[selectedHotbarSlot].count > 1) {
+            // 如果还有多个种子，减少数量
+            newSlots[selectedHotbarSlot] = {
+              ...newSlots[selectedHotbarSlot],
+              count: newSlots[selectedHotbarSlot].count - 1
+            }
+          } else {
+            // 如果只剩1个种子，清空槽位
+            newSlots[selectedHotbarSlot] = createEmptyStack()
+            newSlots[selectedHotbarSlot].id = ''
+          }
+          return newSlots
+        })
+      } else if (!plot) {
+        setMessage('⚠️ 这里没有耕地，请先用锄头开垦')
+      } else if (plot.state === 'empty') {
+        setMessage('⚠️ 这里是草地，请先用锄头开垦')
+      } else if (plot.state === 'ready') {
+        setMessage('⚠️ 这里还有成熟的作物，请先收获')
+      }
+    } else if ((selectedItem as any).treeType) {
+      // 树苗：种植果树（可以在草地上直接种植，不需要耕地）
+      if (!plot) {
+        const treeConfig = getTreeConfig((selectedItem as any).treeType)
+        newPlots.set(posKey, {
+          state: 'tree',
+          treeType: (selectedItem as any).treeType,
+          plantTime: Date.now(),
+          lastHarvestTime: undefined,
+          position: [alignedX, -0.45, alignedZ]
+        })
+        const realSeconds = treeConfig.growTime * 12 * 60 // 游戏天数转秒数
+        setMessage(`✅ 已种植${treeConfig.name}，${treeConfig.growTime}游戏天后成熟（${realSeconds}秒）`)
+
+        // 消耗1个树苗（快捷栏就是背包前8个槽位）
+        setInventorySlots((prev) => {
+          const newSlots = [...prev]
+          if (newSlots[selectedHotbarSlot].count > 1) {
+            newSlots[selectedHotbarSlot] = {
+              ...newSlots[selectedHotbarSlot],
+              count: newSlots[selectedHotbarSlot].count - 1
+            }
+          } else {
+            newSlots[selectedHotbarSlot] = createEmptyStack()
+            newSlots[selectedHotbarSlot].id = ''
+          }
+          return newSlots
+        })
+      } else if (plot && plot.state === 'tree_ready') {
+        // 树木成熟，可以收获
+        const treeType = plot.treeType!
+        const treeConfig = getTreeConfig(treeType)
+
+        const droppedItem = {
+          id: Date.now().toString(),
+          type: treeType as any,
+          position: [plot.position[0], 0, plot.position[2]] as [number, number, number],
+          count: treeConfig.yield
+        }
+
+        setDroppedItems((prev) => [...prev, droppedItem])
+
+        // 更新最后收获时间
+        plot.lastHarvestTime = Date.now()
+        newPlots.set(posKey, plot)
+        setMessage(`🎉 收获成功！${treeConfig.yield}个${treeConfig.name}掉在地上`)
+      } else if (plot && plot.state === 'tree') {
+        setMessage('⚠️ 树木还没成熟，请耐心等待')
+      } else {
+        setMessage('⚠️ 这里已经有东西了，不能种植树木')
+      }
+    } else if (selectedItem.itemType === 'tool' && selectedItem.toolType === 'sickle') {
+      // 镰刀：收获
+      if (plot) {
+        if (plot.state === 'ready' && plot.cropType) {
+          const cropConfig = getCropConfig(plot.cropType)
+          const droppedItem = {
+            id: Date.now().toString(),
+            type: plot.cropType as any,
+            position: [plot.position[0], 0, plot.position[2]] as [number, number, number],
+            count: cropConfig.yield
+          }
+
+          setDroppedItems((prev) => [...prev, droppedItem])
+          plot.state = 'tilled'
+          const harvestedCrop = plot.cropType
+          plot.cropType = undefined
+          plot.plantTime = undefined
+          newPlots.set(posKey, plot)
+          setMessage(`🎉 收获成功！${cropConfig.yield}个${cropConfig.name}掉在地上`)
+
+          // 检查是否首次收获该作物，如果是则解锁下一个作物
+          if (harvestedCrop && !harvestedCrops.has(harvestedCrop)) {
+            setHarvestedCrops((prev) => new Set(prev).add(harvestedCrop))
+            unlockNextCrop(harvestedCrop)
+          }
+        } else if (plot.state === 'planted') {
+          setMessage('⚠️ 作物还没成熟')
+        } else if (plot.state === 'empty') {
+          setMessage('⚠️ 这里没有作物')
+        }
+      }
+    } else {
+      setMessage(`❌ 当前物品（${selectedItem.name}）无法使用在这块土地上`)
     }
+
     setPlots(newPlots)
   }
 
-  // 树木位置
-  const treePositions: [number, number, number][] = [
-    [-15, 0, 10], [-18, 0, 8], [-20, 0, 5], [-15, 0, -10],
-    [18, 0, 12], [20, 0, 8], [22, 0, -5], [18, 0, -12],
-    [-5, 0, 15], [5, 0, 15], [0, 0, 18], [-8, 0, -15], [8, 0, -15]
-  ]
-
-  const toolEmoji: any = {
-    hoe: '🪓',
-    water: '💧',
-    seed: '🌱',
-    harvest: '🌾'
-  }
-
   return (
-    <div style={{
-      width: '100vw',
-      height: '100vh',
-      position: 'relative',
-      background: '#87CEEB',
-      overflow: 'hidden'
-    }}>
-      <Canvas
-        camera={{ position: [0, 1.6, 5], fov: 75 }}
-        shadows
-        style={{ width: '100%', height: '100%' }}
-      >
+    <div
+      style={{
+        width: '100vw',
+        height: '100vh',
+        position: 'relative',
+        background: '#87CEEB',
+        overflow: 'hidden'
+      }}
+    >
+      <Canvas camera={{ position: [0, 1.6, 5], fov: 75 }} shadows style={{ width: '100%', height: '100%' }}>
         <Sky distance={450000} sunPosition={[100, 50, 100]} inclination={0.6} azimuth={0.25} />
 
         <ambientLight intensity={0.6} />
@@ -1278,36 +1449,38 @@ function FarmScene3D() {
         />
 
         {/* 建造预览 */}
-        <BuildPreview
-          buildMode={buildMode}
-          selectedMaterial={selectedMaterial}
-          placedBlocks={placedBlocks}
-        />
+        <BuildPreview buildMode={buildMode} selectedMaterial={selectedMaterial} placedBlocks={placedBlocks} />
 
         {/* 已放置的方块 */}
         {placedBlocks.map((block) => (
-          <PlacedBlock
-            key={block.id}
-            block={block}
-            onRemove={handleRemoveBlock}
+          <PlacedBlock key={block.id} block={block} onRemove={handleRemoveBlock} />
+        ))}
+
+        {/* 动物 */}
+        {animals.map((animal) => (
+          <PlacedAnimalComponent
+            key={animal.id}
+            animal={animal}
+            onRightClick={handleAnimalRightClick}
           />
         ))}
 
-        {/* 大型草地地面 */}
-        <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.05, 0]} receiveShadow>
-          <planeGeometry args={[100, 100]} />
-          <meshStandardMaterial color="#7CFC00" />
-        </mesh>
+        {/* 无限地面 - 已禁用，现在使用完整的地表方块系统 */}
+        {/* <InfiniteGround playerPosition={playerPosition} /> */}
 
-        {/* 路径 */}
-        <mesh rotation={[-Math.PI / 2, 0, 0]} position={[9, -0.04, 0]} receiveShadow>
-          <planeGeometry args={[8, 3]} />
-          <meshStandardMaterial color="#DEB887" />
-        </mesh>
-        <mesh rotation={[-Math.PI / 2, 0, 0]} position={[-9, -0.04, 0]} receiveShadow>
-          <planeGeometry args={[8, 3]} />
-          <meshStandardMaterial color="#DEB887" />
-        </mesh>
+        {/* 地下方块（包含地表方块和地下方块） */}
+        <UndergroundBlocks playerPosition={playerPosition} minedBlocks={minedBlocks} onBlockMined={handleBlockMined} targetBlock={targetBlock} />
+
+        {/* 挖矿系统（右键长按挖掘）- 暂时注释掉 */}
+        {/* <MiningSystem
+          playerPosition={playerPosition}
+          isLocked={isLocked}
+          onBlockMined={handleBlockMined}
+          onMiningProgressChange={(progress, targetBlock, isVisible) => {
+            setMiningProgress({ progress, targetBlock, visible: isVisible })
+          }}
+          onTargetBlockChange={setTargetBlock}
+        /> */}
 
         {/* 动态农场地块 */}
         {Array.from(plots.entries()).map(([posKey, plot]) => (
@@ -1315,6 +1488,10 @@ function FarmScene3D() {
             key={posKey}
             position={plot.position}
             state={plot.state}
+            cropType={plot.cropType}
+            treeType={plot.treeType}
+            plantTime={plot.plantTime}
+            lastHarvestTime={plot.lastHarvestTime}
             onClick={() => {}}
           />
         ))}
@@ -1324,615 +1501,77 @@ function FarmScene3D() {
           <DroppedItem key={item.id} item={item} />
         ))}
 
-        {/* 房子 */}
-        <House position={[13, 0, 0]} />
-        <House position={[-13, 0, 0]} />
-        <House position={[13, 0, -13]} />
+        {/* 草地装饰（随机生成的草和花）- 已禁用 */}
+        {/* <GrassDecorations /> */}
 
-        {/* 树木 */}
-        {treePositions.map((pos, i) => (
-          <Tree key={`tree-${i}`} position={pos} onChop={handleTreeChop} />
-        ))}
+        {/* 无限树木 */}
+        <InfiniteTrees playerPosition={playerPosition} onChop={handleTreeChop} />
       </Canvas>
 
-      {/* 点击开始屏幕/暂停菜单 */}
-      {!isLocked && showPauseMenu && (
-        <div
-          style={{
-            position: 'absolute',
-            top: 0,
-            left: 0,
-            right: 0,
-            bottom: 0,
-            background: 'rgba(0, 0, 0, 0.7)',
-            display: 'flex',
-            flexDirection: 'column',
-            justifyContent: 'center',
-            alignItems: 'center',
-            color: 'white',
-            zIndex: 1000,
-            cursor: 'pointer'
-          }}
-          onClick={() => {
-            setShowPauseMenu(false)
-            const canvas = document.querySelector('canvas')
-            if (canvas) canvas.click()
-          }}
-        >
-          <h1 style={{ fontSize: '48px', marginBottom: '20px' }}>🌾 我的世界农场</h1>
-          <p style={{ fontSize: '24px', marginBottom: '30px' }}>点击屏幕开始游戏</p>
-          <div style={{ fontSize: '18px', textAlign: 'center', lineHeight: '1.8' }}>
-            <div>🎮 WASD / 方向键 - 移动</div>
-            <div>🖱️ 鼠标 - 视角</div>
-            <div>🔢 1-4 - 切换工具</div>
-            <div>📷 V键 - 切换视角</div>
-            <div>🎨 C键 - 颜色设置</div>
-            <div>🎒 B键 - 背包</div>
-            <div>🛒 U键 - 商店</div>
-            <div>🔨 F键 - 建造模式 (5-7选择材料)</div>
-            <div>👆 左键 - 操作/放置</div>
-            <div>🪓 点击树木 - 砍伐获得木材</div>
-            <div>⌨️ ESC - 暂停</div>
-          </div>
-        </div>
-      )}
+      {/* 暂停菜单 */}
+      <PauseMenu isVisible={!isLocked && showPauseMenu} onResume={() => setShowPauseMenu(false)} />
 
-      {/* 准心 */}
-      {isLocked && (
-        <div style={{
-          position: 'absolute',
-          top: '50%',
-          left: '50%',
-          transform: 'translate(-50%, -50%)',
-          pointerEvents: 'none',
-          zIndex: 100
-        }}>
-          <div style={{
-            width: '20px',
-            height: '20px',
-            border: '2px solid rgba(255, 255, 255, 0.8)',
-            borderRadius: '50%'
-          }} />
-          <div style={{
-            position: 'absolute',
-            top: '50%',
-            left: '50%',
-            transform: 'translate(-50%, -50%)',
-            width: '4px',
-            height: '4px',
-            background: 'rgba(255, 255, 255, 0.8)',
-            borderRadius: '50%'
-          }} />
-        </div>
-      )}
+      {/* HUD */}
+      <HUD
+        isVisible={isLocked}
+        message={message}
+        hotbarSlots={hotbarSlots}
+        selectedHotbarSlot={selectedHotbarSlot}
+        buildMode={buildMode}
+        selectedMaterial={selectedMaterial}
+        cameraMode={cameraMode}
+        onSlotSelect={handleHotbarSlotSelect}
+      />
 
-      {/* HUD - 顶部信息 */}
-      {isLocked && (
-        <div style={{
-          position: 'absolute',
-          top: '20px',
-          left: '20px',
-          color: 'white',
-          fontSize: '18px',
-          textShadow: '2px 2px 4px rgba(0,0,0,0.8)',
-          zIndex: 100
-        }}>
-          <div style={{ fontSize: '24px', fontWeight: 'bold', marginBottom: '10px' }}>
-            {message}
-          </div>
-          <div>当前工具: {toolEmoji[currentTool]}</div>
-          {buildMode && (
-            <div style={{ marginTop: '8px', color: '#FFD700', fontWeight: 'bold' }}>
-              🔨 建造模式: {selectedMaterial === 'wood' ? '🪵' : selectedMaterial === 'stone' ? '🪨' : '🟫'} {selectedMaterial}
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* HUD - 工具栏 */}
-      {isLocked && (
-        <div style={{
-          position: 'absolute',
-          bottom: '20px',
-          left: '50%',
-          transform: 'translateX(-50%)',
-          display: 'flex',
-          gap: '10px',
-          zIndex: 100
-        }}>
-          {(['hoe', 'water', 'seed', 'harvest'] as const).map((tool, index) => (
-            <button
-              key={tool}
-              onClick={() => setCurrentTool(tool)}
-              style={{
-                width: '70px',
-                height: '70px',
-                background: currentTool === tool
-                  ? 'rgba(255, 215, 0, 0.9)'
-                  : 'rgba(0, 0, 0, 0.6)',
-                border: currentTool === tool ? '3px solid white' : '2px solid rgba(255,255,255,0.3)',
-                borderRadius: '8px',
-                color: 'white',
-                fontSize: '28px',
-                cursor: 'pointer',
-                display: 'flex',
-                flexDirection: 'column',
-                alignItems: 'center',
-                justifyContent: 'center',
-                fontWeight: currentTool === tool ? 'bold' : 'normal'
-              }}
-            >
-              <div style={{ fontSize: '24px' }}>{toolEmoji[tool]}</div>
-              <div style={{ fontSize: '12px', marginTop: '2px' }}>按 {index + 1}</div>
-            </button>
-          ))}
-        </div>
-      )}
+      {/* 挖掘进度条 */}
+      <MiningProgressBar
+        progress={miningProgress.progress}
+        targetBlock={miningProgress.targetBlock}
+        isVisible={miningProgress.visible}
+      />
 
       {/* 颜色设置面板 */}
-      {showColorPanel && (
-        <div
-          onClick={(e) => e.stopPropagation()}
-          onPointerDown={(e) => e.stopPropagation()}
-          style={{
-            position: 'absolute',
-            top: '50%',
-            left: '50%',
-            transform: 'translate(-50%, -50%)',
-            background: 'rgba(0, 0, 0, 0.9)',
-            padding: '30px',
-            borderRadius: '16px',
-            color: 'white',
-            zIndex: 200,
-            minWidth: '300px',
-            border: '3px solid rgba(255, 215, 0, 0.6)'
-          }}
-        >
-          <h3 style={{ margin: '0 0 20px 0', fontSize: '24px', color: '#FFD700' }}>🎨 角色颜色设置</h3>
+      <ColorPanel
+        isVisible={showColorPanel}
+        playerColors={playerColors}
+        onColorChange={setPlayerColors}
+        onClose={() => setShowColorPanel(false)}
+      />
 
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '15px' }}>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-              <label>头部颜色：</label>
-              <input
-                type="color"
-                value={playerColors.head}
-                onChange={(e) => setPlayerColors({ ...playerColors, head: e.target.value })}
-                style={{ width: '60px', height: '40px', cursor: 'pointer' }}
-              />
-            </div>
+      {/* 背包界面（旧版，暂时保留） */}
+      <Inventory
+        isVisible={false} // 暂时禁用旧版
+        gold={gold}
+        inventory={inventory}
+        onClose={() => setShowInventory(false)}
+        onSellItem={sellItem}
+        onDropItem={dropItem}
+      />
 
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-              <label>身体颜色：</label>
-              <input
-                type="color"
-                value={playerColors.body}
-                onChange={(e) => setPlayerColors({ ...playerColors, body: e.target.value })}
-                style={{ width: '60px', height: '40px', cursor: 'pointer' }}
-              />
-            </div>
-
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-              <label>四肢颜色：</label>
-              <input
-                type="color"
-                value={playerColors.limbs}
-                onChange={(e) => setPlayerColors({ ...playerColors, limbs: e.target.value })}
-                style={{ width: '60px', height: '40px', cursor: 'pointer' }}
-              />
-            </div>
-          </div>
-
-          <div style={{ marginTop: '20px', display: 'flex', gap: '10px', justifyContent: 'center' }}>
-            <button
-              onClick={() => {
-                setShowColorPanel(false)
-              }}
-              style={{
-                padding: '10px 20px',
-                background: 'rgba(255, 215, 0, 0.9)',
-                border: '2px solid white',
-                borderRadius: '8px',
-                color: '#8B4513',
-                fontSize: '16px',
-                fontWeight: 'bold',
-                cursor: 'pointer'
-              }}
-            >
-              关闭
-            </button>
-          </div>
-
-          <div style={{ marginTop: '15px', fontSize: '14px', color: '#90EE90', textAlign: 'center' }}>
-            💡 提示：按 V 键切换到第三人称查看效果
-          </div>
-        </div>
-      )}
-
-      {/* 视角指示器 */}
-      {isLocked && (
-        <div style={{
-          position: 'absolute',
-          top: '20px',
-          right: '20px',
-          background: 'rgba(0, 0, 0, 0.6)',
-          padding: '10px 20px',
-          borderRadius: '8px',
-          color: 'white',
-          fontSize: '14px',
-          zIndex: 100,
-          border: '2px solid rgba(255, 215, 0, 0.4)'
-        }}>
-          <div>📷 当前视角: {cameraMode === 'first' ? '第一人称' : '第三人称'}</div>
-          <div style={{ fontSize: '12px', marginTop: '5px', color: '#90EE90' }}>
-            按 V 切换 | 按 C 设置颜色 | 按 B 背包 | 按 U 商店 | 按 F 建造模式
-          </div>
-        </div>
-      )}
-
-      {/* 背包界面 */}
-      {showInventory && (
-        <div
-          onClick={(e) => e.stopPropagation()}
-          onPointerDown={(e) => e.stopPropagation()}
-          style={{
-            position: 'absolute',
-            top: '50%',
-            left: '50%',
-            transform: 'translate(-50%, -50%)',
-            background: 'rgba(139, 69, 19, 0.95)',
-            padding: '30px',
-            borderRadius: '16px',
-            color: 'white',
-            zIndex: 200,
-            minWidth: '400px',
-            border: '3px solid rgba(255, 215, 0, 0.6)',
-            boxShadow: '0 8px 32px rgba(0,0,0,0.5)'
-          }}
-        >
-          <h3 style={{ margin: '0 0 20px 0', fontSize: '28px', color: '#FFD700', textAlign: 'center' }}>🎒 背包</h3>
-
-          {/* 金币显示 */}
-          <div style={{
-            background: 'rgba(255, 215, 0, 0.2)',
-            padding: '15px',
-            borderRadius: '8px',
-            marginBottom: '20px',
-            textAlign: 'center',
-            border: '2px solid rgba(255, 215, 0, 0.4)'
-          }}>
-            <div style={{ fontSize: '24px', color: '#FFD700', fontWeight: 'bold' }}>
-              💰 金币: {gold}
-            </div>
-          </div>
-
-          {/* 物品列表 */}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '15px' }}>
-            {/* 胡萝卜 */}
-            {inventory.carrot > 0 && (
-              <div style={{
-                background: 'rgba(255, 255, 255, 0.1)',
-                padding: '15px',
-                borderRadius: '8px',
-                border: '2px solid rgba(255, 255, 255, 0.2)'
-              }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
-                  <div style={{ fontSize: '20px' }}>
-                    🥕 胡萝卜 x {inventory.carrot}
-                  </div>
-                  <div style={{ fontSize: '16px', color: '#90EE90' }}>
-                    单价: 10 金币
-                  </div>
-                </div>
-
-                <div style={{ display: 'flex', gap: '10px' }}>
-                  <button
-                    onClick={() => sellItem('carrot', 1)}
-                    style={{
-                      flex: 1,
-                      padding: '10px',
-                      background: 'linear-gradient(to bottom, #4CAF50, #45a049)',
-                      border: '2px solid #2d6a2d',
-                      borderRadius: '8px',
-                      color: 'white',
-                      fontSize: '14px',
-                      fontWeight: 'bold',
-                      cursor: 'pointer'
-                    }}
-                  >
-                    出售1个
-                  </button>
-                  <button
-                    onClick={() => sellItem('carrot', inventory.carrot)}
-                    style={{
-                      flex: 1,
-                      padding: '10px',
-                      background: 'linear-gradient(to bottom, #4CAF50, #45a049)',
-                      border: '2px solid #2d6a2d',
-                      borderRadius: '8px',
-                      color: 'white',
-                      fontSize: '14px',
-                      fontWeight: 'bold',
-                      cursor: 'pointer'
-                    }}
-                  >
-                    全部出售
-                  </button>
-                  <button
-                    onClick={() => dropItem('carrot', 1)}
-                    style={{
-                      flex: 1,
-                      padding: '10px',
-                      background: 'linear-gradient(to bottom, #f44336, #da190b)',
-                      border: '2px solid #a9190b',
-                      borderRadius: '8px',
-                      color: 'white',
-                      fontSize: '14px',
-                      fontWeight: 'bold',
-                      cursor: 'pointer'
-                    }}
-                  >
-                    丢掉1个
-                  </button>
-                </div>
-              </div>
-            )}
-
-            {/* 空背包提示 */}
-            {inventory.carrot === 0 && (
-              <div style={{
-                background: 'rgba(255, 255, 255, 0.05)',
-                padding: '30px',
-                borderRadius: '8px',
-                textAlign: 'center',
-                fontSize: '16px',
-                color: '#999'
-              }}>
-                背包是空的<br/>
-                <span style={{ fontSize: '14px' }}>走近掉落物品可自动拾取</span>
-              </div>
-            )}
-          </div>
-
-          <div style={{ marginTop: '20px', textAlign: 'center' }}>
-            <button
-              onClick={() => setShowInventory(false)}
-              style={{
-                padding: '10px 30px',
-                background: 'linear-gradient(to bottom, #FFD700, #FFA500)',
-                border: '2px solid #8B4513',
-                borderRadius: '8px',
-                color: '#8B4513',
-                fontSize: '16px',
-                fontWeight: 'bold',
-                cursor: 'pointer'
-              }}
-            >
-              关闭 (B)
-            </button>
-          </div>
-
-          <div style={{ marginTop: '15px', fontSize: '12px', color: '#90EE90', textAlign: 'center' }}>
-            💡 提示：走近物品自动拾取 | 出售获得金币
-          </div>
-        </div>
-      )}
+      {/* 新背包界面 */}
+      <InventoryPanel
+        isVisible={showInventory}
+        inventorySlots={inventorySlots}
+        gold={gold}
+        selectedSlot={selectedHotbarSlot}
+        onClose={() => setShowInventory(false)}
+        onSlotSelect={handleHotbarSlotSelect}
+        onMoveItem={handleMoveItem}
+        onUseItem={handleUseItem}
+        onSellItem={handleSellItemFromNewInventory}
+      />
 
       {/* 商店界面 */}
-      {showShop && (
-        <div
-          onClick={(e) => e.stopPropagation()}
-          onPointerDown={(e) => e.stopPropagation()}
-          style={{
-            position: 'absolute',
-            top: '50%',
-            left: '50%',
-            transform: 'translate(-50%, -50%)',
-            background: 'rgba(139, 69, 19, 0.95)',
-            padding: '30px',
-            borderRadius: '16px',
-            color: 'white',
-            zIndex: 200,
-            minWidth: '450px',
-            maxWidth: '500px',
-            border: '3px solid rgba(255, 215, 0, 0.6)',
-            boxShadow: '0 8px 32px rgba(0,0,0,0.5)'
-          }}
-        >
-          <h3 style={{ margin: '0 0 20px 0', fontSize: '28px', color: '#FFD700', textAlign: 'center' }}>🛒 商店</h3>
-
-          {/* 金币显示 */}
-          <div style={{
-            background: 'rgba(255, 215, 0, 0.2)',
-            padding: '15px',
-            borderRadius: '8px',
-            marginBottom: '20px',
-            textAlign: 'center',
-            border: '2px solid rgba(255, 215, 0, 0.4)'
-          }}>
-            <div style={{ fontSize: '24px', color: '#FFD700', fontWeight: 'bold' }}>
-              💰 我的金币: {gold}
-            </div>
-          </div>
-
-          {/* 材料列表 */}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '15px', maxHeight: '400px', overflowY: 'auto' }}>
-            {/* 木头 */}
-            <div style={{
-              background: 'rgba(139, 69, 19, 0.3)',
-              padding: '15px',
-              borderRadius: '8px',
-              border: '2px solid rgba(139, 69, 19, 0.5)'
-            }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
-                <div style={{ fontSize: '20px' }}>
-                  🪵 木头
-                </div>
-                <div style={{ fontSize: '16px', color: '#FFD700' }}>
-                  5 金币/个 | 拥有: {inventory.wood}
-                </div>
-              </div>
-              <div style={{ display: 'flex', gap: '8px' }}>
-                <button
-                  onClick={() => buyMaterial('wood', 1)}
-                  style={{
-                    flex: 1,
-                    padding: '8px',
-                    background: 'linear-gradient(to bottom, #4CAF50, #45a049)',
-                    border: '2px solid #2d6a2d',
-                    borderRadius: '6px',
-                    color: 'white',
-                    fontSize: '14px',
-                    fontWeight: 'bold',
-                    cursor: 'pointer'
-                  }}
-                >
-                  买1个 (5金币)
-                </button>
-                <button
-                  onClick={() => buyMaterial('wood', 10)}
-                  style={{
-                    flex: 1,
-                    padding: '8px',
-                    background: 'linear-gradient(to bottom, #4CAF50, #45a049)',
-                    border: '2px solid #2d6a2d',
-                    borderRadius: '6px',
-                    color: 'white',
-                    fontSize: '14px',
-                    fontWeight: 'bold',
-                    cursor: 'pointer'
-                  }}
-                >
-                  买10个 (50金币)
-                </button>
-              </div>
-            </div>
-
-            {/* 石头 */}
-            <div style={{
-              background: 'rgba(128, 128, 128, 0.3)',
-              padding: '15px',
-              borderRadius: '8px',
-              border: '2px solid rgba(128, 128, 128, 0.5)'
-            }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
-                <div style={{ fontSize: '20px' }}>
-                  🪨 石头
-                </div>
-                <div style={{ fontSize: '16px', color: '#FFD700' }}>
-                  8 金币/个 | 拥有: {inventory.stone}
-                </div>
-              </div>
-              <div style={{ display: 'flex', gap: '8px' }}>
-                <button
-                  onClick={() => buyMaterial('stone', 1)}
-                  style={{
-                    flex: 1,
-                    padding: '8px',
-                    background: 'linear-gradient(to bottom, #4CAF50, #45a049)',
-                    border: '2px solid #2d6a2d',
-                    borderRadius: '6px',
-                    color: 'white',
-                    fontSize: '14px',
-                    fontWeight: 'bold',
-                    cursor: 'pointer'
-                  }}
-                >
-                  买1个 (8金币)
-                </button>
-                <button
-                  onClick={() => buyMaterial('stone', 10)}
-                  style={{
-                    flex: 1,
-                    padding: '8px',
-                    background: 'linear-gradient(to bottom, #4CAF50, #45a049)',
-                    border: '2px solid #2d6a2d',
-                    borderRadius: '6px',
-                    color: 'white',
-                    fontSize: '14px',
-                    fontWeight: 'bold',
-                    cursor: 'pointer'
-                  }}
-                >
-                  买10个 (80金币)
-                </button>
-              </div>
-            </div>
-
-            {/* 泥土 */}
-            <div style={{
-              background: 'rgba(139, 105, 20, 0.3)',
-              padding: '15px',
-              borderRadius: '8px',
-              border: '2px solid rgba(139, 105, 20, 0.5)'
-            }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
-                <div style={{ fontSize: '20px' }}>
-                  🟫 泥土
-                </div>
-                <div style={{ fontSize: '16px', color: '#FFD700' }}>
-                  3 金币/个 | 拥有: {inventory.dirt}
-                </div>
-              </div>
-              <div style={{ display: 'flex', gap: '8px' }}>
-                <button
-                  onClick={() => buyMaterial('dirt', 1)}
-                  style={{
-                    flex: 1,
-                    padding: '8px',
-                    background: 'linear-gradient(to bottom, #4CAF50, #45a049)',
-                    border: '2px solid #2d6a2d',
-                    borderRadius: '6px',
-                    color: 'white',
-                    fontSize: '14px',
-                    fontWeight: 'bold',
-                    cursor: 'pointer'
-                  }}
-                >
-                  买1个 (3金币)
-                </button>
-                <button
-                  onClick={() => buyMaterial('dirt', 10)}
-                  style={{
-                    flex: 1,
-                    padding: '8px',
-                    background: 'linear-gradient(to bottom, #4CAF50, #45a049)',
-                    border: '2px solid #2d6a2d',
-                    borderRadius: '6px',
-                    color: 'white',
-                    fontSize: '14px',
-                    fontWeight: 'bold',
-                    cursor: 'pointer'
-                  }}
-                >
-                  买10个 (30金币)
-                </button>
-              </div>
-            </div>
-          </div>
-
-          <div style={{ marginTop: '20px', textAlign: 'center' }}>
-            <button
-              onClick={() => setShowShop(false)}
-              style={{
-                padding: '10px 30px',
-                background: 'linear-gradient(to bottom, #FFD700, #FFA500)',
-                border: '2px solid #8B4513',
-                borderRadius: '8px',
-                color: '#8B4513',
-                fontSize: '16px',
-                fontWeight: 'bold',
-                cursor: 'pointer'
-              }}
-            >
-              关闭 (U)
-            </button>
-          </div>
-
-          <div style={{ marginTop: '15px', fontSize: '12px', color: '#90EE90', textAlign: 'center' }}>
-            💡 提示：按F进入建造模式放置方块 | 砍树获得木材
-          </div>
-        </div>
-      )}
+      <Shop
+        isVisible={showShop}
+        gold={gold}
+        inventory={inventory}
+        backpackItems={hotbarSlots.concat(inventorySlots)}
+        onClose={() => setShowShop(false)}
+        onBuyMaterial={buyMaterial}
+        onBuyItem={buyItem}
+        onSellItem={sellItem}
+      />
     </div>
   )
 }
