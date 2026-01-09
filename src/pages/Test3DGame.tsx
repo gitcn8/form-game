@@ -1,6 +1,6 @@
-import { useState, useEffect, useMemo } from 'react'
+import { useState, useEffect, useMemo, useRef } from 'react'
 import { Canvas } from '@react-three/fiber'
-import { Sky } from '@react-three/drei'
+import { Sky, Html } from '@react-three/drei'
 
 // World Components
 import { FarmPlot } from '../components/world/FarmPlot'
@@ -15,6 +15,7 @@ import { FirstPersonController } from '../components/player/FirstPersonControlle
 
 // Building Components
 import { PlacedBlock } from '../components/building/PlacedBlock'
+import { PlacedFacility } from '../components/building/PlacedFacility'
 import { BuildPreview } from '../components/building/BuildPreview'
 
 // Mining Components
@@ -28,6 +29,8 @@ import { Inventory } from '../components/ui/Inventory'
 import { ColorPanel } from '../components/ui/ColorPanel'
 import { PauseMenu } from '../components/ui/PauseMenu'
 import { HUD } from '../components/ui/HUD'
+import { MachinePanel } from '../components/ui/MachinePanel'
+import { ShortcutHelp } from '../components/ui/ShortcutHelp'
 
 // Inventory Components
 import { Hotbar } from '../components/inventory/Hotbar'
@@ -43,12 +46,12 @@ import {
   CropType,
   ToolType,
   DecorationType,
-  MachineType,
   AnimalType,
   SpecialType,
   FacilityType,
   AnimalProductType,
-  TreeType
+  TreeType,
+  ITEM_CONFIG
 } from '../components/inventory/ItemStack'
 
 // Farming Components
@@ -56,9 +59,34 @@ import { CROP_CONFIG, getCropConfig, isCropReady } from '../components/farming/C
 import { SeedType as FarmingSeedType, SEED_CONFIG, getSeedTypeByCrop, buySeedPack, calculateSeedCost, SEED_SHOP_ITEMS } from '../components/farming/SeedConfig'
 import { TREE_CONFIG, getTreeConfig, isTreeReady, getTreeGrowthProgress } from '../components/farming/TreeConfig'
 
+// Machine Components
+import {
+  MACHINE_CONFIGS,
+  FOOD_ITEMS,
+  getMachineConfig,
+  getRecipe,
+  canCraftRecipe,
+  getProcessProgress,
+  type PlacedMachine,
+  type MachineType,
+  type FoodRecipe,
+  type FoodType
+} from '../config/MachineConfig'
+
+// Utils
+import {
+  consumeIngredients,
+  hasEnoughIngredients,
+  createFoodItem
+} from '../utils/itemMatcher'
+import { audioManager } from '../utils/AudioManager'
+
 // Animal Components
 import { PlacedAnimal as PlacedAnimalComponent } from '../components/animals/PlacedAnimal'
 import { ANIMAL_CONFIGS, PlacedAnimal, shouldUpgradeGrowthStage, isAnimalHungry, canAnimalProduce } from '../components/animals/AnimalConfig'
+
+// Machine Components
+import { PlacedMachineMesh } from '../components/machines/PlacedMachine'
 
 // 主场景
 function FarmScene3D() {
@@ -68,6 +96,7 @@ function FarmScene3D() {
     position: [number, number, number]
     cropType?: CropType  // 新增：作物类型
     plantTime?: number   // 新增：种植时间戳（毫秒）
+    tilledTime?: number  // 新增：开垦时间戳（毫秒），用于耕地退化
   }>>(new Map())
 
   const [selectedSeed, setSelectedSeed] = useState<CropType>('carrot') // 当前选中的种子（默认）
@@ -102,13 +131,58 @@ function FarmScene3D() {
     door: 0,
     planks: 0
   })
-  const [gold, setGold] = useState(100) // 初始金币
+  const [gold, setGold] = useState(1000) // 初始金币（测试用）
   const [showInventory, setShowInventory] = useState(false)
   const [showShop, setShowShop] = useState(false) // 商店面板
+  const [showShortcutHelp, setShowShortcutHelp] = useState(false) // 快捷键帮助
 
   // 作物解锁系统
   const [unlockedCrops, setUnlockedCrops] = useState<CropType[]>(['wheat']) // 已解锁的作物
   const [harvestedCrops, setHarvestedCrops] = useState<Set<CropType>>(new Set()) // 已收获过的作物
+
+  // 机器与食物加工系统
+  const [placedMachines, setPlacedMachines] = useState<Map<string, PlacedMachine>>(new Map()) // 放置的机器
+  const [selectedMachine, setSelectedMachine] = useState<string | null>(null) // 当前选中的机器ID
+  const [showMachinePanel, setShowMachinePanel] = useState(false) // 机器面板显示状态
+  const [machinePanelCooldown, setMachinePanelCooldown] = useState(false) // 面板关闭后的冷却时间
+
+  // 装饰品系统
+  const [placedDecorations, setPlacedDecorations] = useState<Map<string, {
+    id: string
+    decorationType: 'decor_table' | 'decor_chair' | 'decor_bed' | 'decor_cabinet' | 'decor_flowerpot' | 'decor_painting'
+    position: [number, number, number]
+  }>>(new Map()) // 放置的装饰品
+
+  // 设施系统（鸡舍、牛棚）
+  const [placedFacilities, setPlacedFacilities] = useState<Map<string, {
+    id: string
+    facilityType: 'facility_chicken_coop' | 'facility_barn'
+    position: [number, number, number]
+    rotation?: number
+  }>>(new Map()) // 放置的设施
+
+  // 体力系统
+  const [stamina, setStamina] = useState(100) // 当前体力值（0-100）
+  const [maxStamina] = useState(100) // 最大体力值
+  const [satiety, setSatiety] = useState(100) // 饱食度（0-100）
+  const [activeBuffs, setActiveBuffs] = useState<Array<{
+    type: 'speed' | 'efficiency' | 'luck'
+    value: number
+    endTime: number
+  }>>([]) // 当前激活的增益效果
+
+  // 消耗体力的辅助函数
+  const consumeStamina = (amount: number) => {
+    setStamina((prev) => Math.max(0, prev - amount))
+    if (stamina - amount <= 0) {
+      setMessage('⚠️ 体力不足！请食用食物恢复体力')
+    }
+  }
+
+  // 检查体力是否足够
+  const hasEnoughStamina = (amount: number) => {
+    return stamina >= amount
+  }
 
   // 新背包系统
   const [inventorySlots, setInventorySlots] = useState<ItemStack[]>(() => {
@@ -129,8 +203,8 @@ function FarmScene3D() {
     if (wheatSeedStack) slots.push(wheatSeedStack)
     else slots.push(createEmptyStack())
 
-    // 槽位5-8：空槽位（后续通过收获解锁）
-    for (let i = 5; i < 8; i++) {
+    // 槽位4-7：空槽位（后续通过收获解锁）
+    for (let i = 4; i < 8; i++) {
       slots.push(createEmptyStack())
     }
 
@@ -141,12 +215,29 @@ function FarmScene3D() {
 
     return slots
   })
-  const [selectedHotbarSlot, setSelectedHotbarSlot] = useState(0) // 当前选中的快捷栏槽位
+  const [selectedHotbarSlot, setSelectedHotbarSlot] = useState(0) // 当前选中的背包槽位（0-63）
+  const [hotbarOffset, setHotbarOffset] = useState(0) // 快捷栏窗口的起始位置
 
-  // 快捷栏直接使用背包的前8个槽位
-  const hotbarSlots = useMemo(() => inventorySlots.slice(0, 8), [inventorySlots])
+  // 快捷栏显示背包的连续10个槽位（滑动窗口）
+  const hotbarSlots = useMemo(() => {
+    // 确保选中槽位在可见窗口内
+    if (selectedHotbarSlot < hotbarOffset) {
+      setHotbarOffset(selectedHotbarSlot)
+    } else if (selectedHotbarSlot >= hotbarOffset + 10) {
+      setHotbarOffset(selectedHotbarSlot - 9)
+    }
 
-  // 辅助函数：更新快捷栏槽位（更新inventorySlots的前8个）
+    // 确保窗口不超出背包范围（背包共64个槽位）
+    const maxOffset = Math.max(0, inventorySlots.length - 10)
+    const safeOffset = Math.min(Math.max(hotbarOffset, 0), maxOffset)
+    if (safeOffset !== hotbarOffset) {
+      setHotbarOffset(safeOffset)
+    }
+
+    return inventorySlots.slice(safeOffset, safeOffset + 10)
+  }, [inventorySlots, hotbarOffset, selectedHotbarSlot])
+
+  // 辅助函数：更新背包槽位（快捷栏是背包的一个窗口）
   const updateHotbarSlot = (index: number, newValue: ItemStack) => {
     setInventorySlots((prev) => {
       const newSlots = [...prev]
@@ -226,17 +317,140 @@ function FarmScene3D() {
     return () => clearInterval(growthCheckInterval)
   }, [])
 
+  // 耕地退化检查 - 每秒检查一次，超过60秒未操作的耕地恢复为草地
+  useEffect(() => {
+    const decayCheckInterval = setInterval(() => {
+      const now = Date.now()
+      const FARMLAND_DECAY_TIME = 60 * 1000 // 60秒（毫秒）
+
+      setPlots((prev) => {
+        const updated = new Map(prev)
+        let hasDecayed = false
+        const decayedBlocks: string[] = []
+
+        updated.forEach((plot, posKey) => {
+          // 只检查状态为 'tilled' 的耕地（已开垦但未播种、未浇水）
+          if (plot.state === 'tilled' && plot.tilledTime) {
+            const timeSinceTilled = now - plot.tilledTime
+
+            // 如果超过60秒，恢复为草地
+            if (timeSinceTilled > FARMLAND_DECAY_TIME) {
+              plot.state = 'empty'
+              plot.position[1] = 0 // 恢复到地面高度
+              plot.tilledTime = undefined // 清除开垦时间
+              updated.set(posKey, plot)
+
+              // 记录需要从 minedBlocks 中移除的方块
+              const [x, , z] = plot.position
+              decayedBlocks.push(`${x},0,${z}`)
+              hasDecayed = true
+            }
+          }
+        })
+
+        // 如果有耕地退化了，更新 minedBlocks
+        if (hasDecayed) {
+          setMinedBlocks((prev) => {
+            const newSet = new Set(prev)
+            decayedBlocks.forEach(blockKey => newSet.delete(blockKey))
+            return newSet
+          })
+          setMessage('🌱 部分耕地因长期未使用已恢复为草地')
+        }
+
+        return updated
+      })
+    }, 1000) // 每秒检查一次
+
+    return () => clearInterval(decayCheckInterval)
+  }, [])
+
+  // 机器加工进度检查 - 每秒检查一次机器加工进度
+  useEffect(() => {
+    const processCheckInterval = setInterval(() => {
+      const now = Date.now()
+
+      setPlacedMachines((prev) => {
+        const updated = new Map(prev)
+        let hasCompleted = false
+
+        updated.forEach((machine, machineId) => {
+          if (machine.processing && machine.processEndTime) {
+            // 检查加工是否完成
+            if (now >= machine.processEndTime!) {
+              // 加工完成：停止加工状态，但保留recipeId以便显示"收取"按钮
+              machine.processing = false
+              machine.processStartTime = undefined
+              machine.processEndTime = undefined
+              // ❌ 不要清除 recipeId！收取时才清除
+              // machine.recipeId = undefined
+              updated.set(machineId, machine)
+              hasCompleted = true
+            }
+          }
+        })
+
+        if (hasCompleted) {
+          setMessage('✅ 食物加工完成！请打开机器面板收取')
+        }
+
+        return updated
+      })
+    }, 1000) // 每秒检查一次
+
+    return () => clearInterval(processCheckInterval)
+  }, [])
+
+  // 增益效果管理 - 每秒检查一次增益效果是否过期
+  useEffect(() => {
+    const buffCheckInterval = setInterval(() => {
+      const now = Date.now()
+
+      setActiveBuffs((prev) => {
+        // 过滤掉已过期的增益效果
+        const active = prev.filter(buff => now < buff.endTime)
+
+        // 如果有增益效果过期，通知玩家
+        if (active.length < prev.length) {
+          const expiredCount = prev.length - active.length
+          if (expiredCount > 0) {
+            setMessage(`⏰ ${expiredCount}个增益效果已过期`)
+          }
+        }
+
+        return active
+      })
+    }, 1000) // 每秒检查一次
+
+    return () => clearInterval(buffCheckInterval)
+  }, [])
+
+  // 体力自动恢复 - 每10秒恢复1点体力（当饱食度>0时）
+  useEffect(() => {
+    const staminaRegenInterval = setInterval(() => {
+      setStamina((prev) => {
+        // 只有当饱食度>0时才自动恢复体力
+        if (satiety > 0 && prev < maxStamina) {
+          return Math.min(maxStamina, prev + 1)
+        }
+        return prev
+      })
+    }, 10000) // 每10秒恢复1点
+
+    return () => clearInterval(staminaRegenInterval)
+  }, [satiety, maxStamina])
+
   // 挖矿系统
   const [minedBlocks, setMinedBlocks] = useState<Set<string>>(new Set()) // 已挖掘的方块
   const [miningProgress, setMiningProgress] = useState({ progress: 0, targetBlock: '', visible: false }) // 挖掘进度
   const [targetBlock, setTargetBlock] = useState<string | null>(null) // 当前瞄准的方块
 
   // 建造系统 - 初始包含简陋房屋
-  const [buildMode, setBuildMode] = useState(false)
   const [selectedMaterial, setSelectedMaterial] = useState<'wood' | 'stone' | 'dirt'>('wood')
   const [placedBlocks, setPlacedBlocks] = useState<
     Array<{ id: string; type: 'wood' | 'stone' | 'dirt' | 'door' | 'glass' | 'planks'; position: [number, number, number] }>
   >([
+    // 5x5 木屋（Minecraft风格）
     // 5x5 木屋（Minecraft风格）
 
     // 地基（5x5）
@@ -368,14 +582,22 @@ function FarmScene3D() {
   // 动物系统
   const [animals, setAnimals] = useState<PlacedAnimal[]>([]) // 已放置的动物
   const [placingAnimal, setPlacingAnimal] = useState<string | null>(null) // 当前正在放置的动物ID
+  const [placingMachine, setPlacingMachine] = useState<MachineType | null>(null) // 当前正在放置的机器类型
 
   // 视角和玩家相关状态
   const [cameraMode, setCameraMode] = useState<'first' | 'third'>('first')
   const [playerPosition, setPlayerPosition] = useState<[number, number, number]>([0, 0, 5])
   const [playerRotation, setPlayerRotation] = useState(0)
   const [isMoving, setIsMoving] = useState(false)
+
+  // 用于音效系统的玩家位置引用（始终获取最新值）
+  const playerPositionRef = useRef<[number, number, number]>([0, 0, 5])
+  useEffect(() => {
+    playerPositionRef.current = playerPosition
+  }, [playerPosition])
   const [showColorPanel, setShowColorPanel] = useState(false)
   const [showPauseMenu, setShowPauseMenu] = useState(true) // 默认显示引导面板
+  const [isFirstTime, setIsFirstTime] = useState(true) // 是否是首次进入游戏
 
   // 玩家颜色配置
   const [playerColors, setPlayerColors] = useState({
@@ -392,8 +614,10 @@ function FarmScene3D() {
    * - 方块：提示可以用于建造
    */
   const handleHotbarSlotSelect = (index: number) => {
-    setSelectedHotbarSlot(index)
-    const stack = hotbarSlots[index]
+    // 确保槽位索引在有效范围内（0-63）
+    const safeIndex = Math.min(Math.max(index, 0), 63)
+    setSelectedHotbarSlot(safeIndex) // 现在可以选择整个背包的任何槽位
+    const stack = inventorySlots[safeIndex]
 
     if (isEmpty(stack)) {
       setMessage('❌ 该槽位为空')
@@ -402,19 +626,28 @@ function FarmScene3D() {
 
     // 根据物品类型显示不同提示
     if (stack.itemType === 'tool' && stack.toolType) {
-      const toolNames: Record<string, string> = {
-        hoe: '锄头',
-        watering_can: '水壶',
-        sickle: '镰刀'
+      const toolInfo: Record<string, { name: string; action: string }> = {
+        hoe: { name: '锄头', action: '点击开垦土地' },
+        watering_can: { name: '水壶', action: '点击浇水' },
+        sickle: { name: '镰刀', action: '点击收获作物' },
+        axe: { name: '斧头', action: '点击砍树' },
+        pickaxe: { name: '镐', action: '点击挖掘' },
+        shovel: { name: '铲子', action: '点击挖掘' }
       }
-      const toolName = toolNames[stack.toolType] || stack.name
-      setMessage(`✅ 切换到：${toolName}`)
+      const info = toolInfo[stack.toolType] || { name: stack.name, action: '使用' }
+      setMessage(`✅ 切换到：${info.name}（${info.action}）`)
     } else if (stack.cropType) {
       setSelectedSeed(stack.cropType)
       const cropConfig = getCropConfig(stack.cropType)
-      setMessage(`✅ 切换到种子：${cropConfig.name}（${cropConfig.growTime}秒成熟）`)
+      setMessage(`✅ 切换到种子：${cropConfig.name}（点击种植）`)
     } else if (stack.itemType === 'block') {
-      setMessage(`✅ 切换到：${stack.name}（按F进入建造模式后放置）`)
+      setMessage(`✅ 切换到：${stack.name}（点击放置）`)
+    } else if (stack.itemType === 'animal') {
+      setMessage(`✅ 切换到：${stack.name}（点击放置）`)
+    } else if (stack.itemType === 'machine') {
+      setMessage(`✅ 切换到：${stack.name}（点击放置）`)
+    } else if (stack.itemType === 'decoration') {
+      setMessage(`✅ 切换到：${stack.name}（点击放置）`)
     } else {
       setMessage(`✅ 切换到：${stack.name}`)
     }
@@ -422,18 +655,46 @@ function FarmScene3D() {
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      // 快捷栏数字键 1-8 - 统一处理
-      if (e.code >= 'Digit1' && e.code <= 'Digit8') {
-        const index = parseInt(e.code.replace('Digit', '')) - 1 // 转换为 0-7
-        handleHotbarSlotSelect(index)
+      // Ctrl 键：切换鼠标锁定状态（用于点击快捷栏）
+      if (e.code === 'ControlLeft' || e.code === 'ControlRight') {
+        // 检查当前实际的锁定状态
+        const actuallyLocked = !!document.pointerLockElement
+
+        if (actuallyLocked || isLocked) {
+          // 鼠标锁定时，解锁鼠标
+          document.exitPointerLock()
+          setIsLocked(false)
+        } else if (!showColorPanel && !showInventory && !showShop && !showShortcutHelp && !showPauseMenu && !showMachinePanel) {
+          // 鼠标解锁且没有面板打开时，重新锁定鼠标
+          const canvas = document.querySelector('canvas')
+          if (canvas) {
+            canvas.requestPointerLock()
+            setIsLocked(true)
+          }
+        }
         e.preventDefault()
         return
       }
 
-      if (e.code === 'KeyF') {
-        // 切换建造模式
-        setBuildMode((prev) => !prev)
-        setMessage((prev) => (prev ? '🔨 退出建造模式' : '🔨 进入建造模式'))
+      // 快捷栏数字键 1-9 和 0 - 支持10个槽位
+      if (e.code >= 'Digit1' && e.code <= 'Digit9') {
+        const index = parseInt(e.code.replace('Digit', '')) - 1 // 转换为 0-8
+        handleHotbarSlotSelect(index)
+        e.preventDefault()
+        return
+      }
+      if (e.code === 'Digit0') {
+        handleHotbarSlotSelect(9) // 第10个槽位
+        e.preventDefault()
+        return
+      }
+
+      if (e.code === 'Slash') {
+        // ? 键（需要按 Shift + /）
+        if (!e.shiftKey) {
+          setShowShortcutHelp((prev) => !prev)
+          e.preventDefault()
+        }
       } else if (e.code === 'KeyV') {
         // 视角切换
         setCameraMode((prev) => {
@@ -443,36 +704,44 @@ function FarmScene3D() {
         })
       } else if (e.code === 'KeyC') {
         // 打开/关闭颜色设置面板
+        if (!showColorPanel) document.exitPointerLock() // 打开时退出指针锁定
         setShowColorPanel((prev) => !prev)
       } else if (e.code === 'KeyB') {
         // 打开/关闭背包
+        if (!showInventory) document.exitPointerLock() // 打开时退出指针锁定
         setShowInventory((prev) => !prev)
       } else if (e.code === 'KeyU') {
         // 打开/关闭商店
+        if (!showShop) document.exitPointerLock() // 打开时退出指针锁定
         setShowShop((prev) => !prev)
       } else if (e.code === 'KeyT') {
         // 测试：放置动物（临时）
         if (placingAnimal) {
           setPlacingAnimal(null)
           setMessage('❌ 取消放置动物')
+        } else if (placingMachine) {
+          setPlacingMachine(null)
+          setMessage('❌ 取消放置机器')
         } else {
           setPlacingAnimal('pig') // 默认放置猪
           const config = ANIMAL_CONFIGS['pig']
           setMessage(`🐷 放置模式：${config.name}（左键放置，右键取消）`)
         }
       } else if (e.code === 'Escape') {
-        // ESC 键：关闭面板并显示暂停菜单
-        if (placingAnimal) {
-          // 退出动物放置模式
-          setPlacingAnimal(null)
-          setMessage('❌ 取消放置动物')
-        } else if (showColorPanel) {
+        // ESC 键：优先关闭面板，没有面板时才显示暂停菜单（需要按两次）
+        if (showColorPanel || showInventory || showShop || showShortcutHelp || showMachinePanel || placingAnimal || placingMachine) {
+          // 第一次 ESC：关闭所有面板和放置模式
           setShowColorPanel(false)
-        } else if (showInventory) {
           setShowInventory(false)
-        } else if (showShop) {
           setShowShop(false)
+          setShowShortcutHelp(false)
+          setShowMachinePanel(false)
+          setSelectedMachine(null)
+          setPlacingAnimal(null)
+          setPlacingMachine(null)
+          setShowPauseMenu(false)  // 确保暂停菜单也关闭
         } else {
+          // 第二次 ESC（没有面板时）：显示暂停菜单
           setShowPauseMenu(true)
         }
       }
@@ -483,14 +752,28 @@ function FarmScene3D() {
     return () => {
       document.removeEventListener('keydown', handleKeyDown)
     }
-  }, [showColorPanel, showInventory, showShop, showPauseMenu, cameraMode, hotbarSlots, selectedSeed, selectedHotbarSlot, buildMode])
+  }, [isLocked, showColorPanel, showInventory, showShop, showPauseMenu, showMachinePanel, cameraMode, hotbarSlots, selectedSeed, selectedHotbarSlot, showShortcutHelp])
+
+  // 监听指针锁定状态变化，确保 isLocked 状态与实际同步
+  useEffect(() => {
+    const handlePointerLockChange = () => {
+      const actuallyLocked = !!document.pointerLockElement
+      setIsLocked(actuallyLocked)
+    }
+
+    document.addEventListener('pointerlockchange', handlePointerLockChange)
+
+    return () => {
+      document.removeEventListener('pointerlockchange', handlePointerLockChange)
+    }
+  }, [])
 
   // 监听面板状态变化，自动解锁指针
   useEffect(() => {
-    if (showColorPanel || showInventory || showShop) {
+    if (showColorPanel || showInventory || showShop || showShortcutHelp || showMachinePanel) {
       document.exitPointerLock()
     }
-  }, [showColorPanel, showInventory, showShop])
+  }, [showColorPanel, showInventory, showShop, showShortcutHelp, showMachinePanel])
 
   // 自动拾取物品（检测玩家与掉落物品的距离）
   useEffect(() => {
@@ -645,6 +928,39 @@ function FarmScene3D() {
     setMessage(`✅ 放置了 ${selectedMaterial} 方块`)
   }
 
+  // 放置设施（鸡舍、牛棚）
+  const handlePlaceFacility = (position: [number, number, number], facilityType: 'facility_chicken_coop' | 'facility_barn') => {
+    const [x, y, z] = position
+
+    // 对齐到网格
+    const alignedX = Math.round(x)
+    const alignedY = 0 // 设施放在地面上
+    const alignedZ = Math.round(z)
+
+    // 检查该位置是否已有设施
+    const posKey = `${alignedX},${alignedY},${alignedZ}`
+    if (placedFacilities.has(posKey)) {
+      setMessage('❌ 该位置已有设施！')
+      return
+    }
+
+    // 添加设施
+    const newFacility = {
+      id: posKey,
+      facilityType,
+      position: [alignedX, alignedY, alignedZ] as [number, number, number],
+      rotation: 0
+    }
+
+    setPlacedFacilities((prev) => new Map(prev).set(posKey, newFacility))
+
+    const facilityNames = {
+      facility_chicken_coop: '鸡舍',
+      facility_barn: '牛棚'
+    }
+    setMessage(`✅ 放置了${facilityNames[facilityType]}`)
+  }
+
   // 移除方块
   const handleRemoveBlock = (blockId: string) => {
     const block = placedBlocks.find((b) => b.id === blockId)
@@ -675,24 +991,272 @@ function FarmScene3D() {
     const config = ANIMAL_CONFIGS[animalType]
     const currentTime = Date.now()
 
+    // 检查该位置是否被占用，如果有，自动偏移到附近空闲位置
+    let finalPosition = [...position] as [number, number, number]
+    if (isPositionOccupied(position[0], position[2])) {
+      const emptyPosition = findNearestEmptyPosition(position[0], position[2])
+      if (!emptyPosition) {
+        setMessage('⚠️ 周围没有空闲位置')
+        return
+      }
+      finalPosition = emptyPosition as [number, number, number]
+    }
+
     // 创建新动物实例
     const newAnimal: PlacedAnimal = {
       id: `${animalType}_${currentTime}_${Math.random().toString(36).slice(2, 9)}`,
       animalId: animalType,
-      position: position,
-      rotation: 0,
+      position: finalPosition,
+      rotation: Math.random() * 360, // 随机初始朝向
       birthTime: currentTime,
       growthStage: 'baby',
       lastFed: currentTime,
       lastProduct: currentTime,
       hunger: 0,
       happiness: 100,
-      health: 100
+      health: 100,
+      lastHungerCheck: currentTime as any,  // 记录上次饥饿检查时间
+      // 移动状态
+      targetPosition: undefined,
+      isMoving: false,
+      lastMoveTime: currentTime,
+      restUntil: currentTime + 2000, // 初始休息2秒
+      // 声音状态
+      lastSoundTime: currentTime,
+      nextSoundTime: currentTime + 3000 // 3秒后才能开始叫
     }
 
     setAnimals((prev) => [...prev, newAnimal])
     setPlacingAnimal(null)
     setMessage(`✅ 放置了${config.name}幼崽`)
+
+    // 播放放置音效
+    setTimeout(() => {
+      audioManager.playInteractionSound('place')
+    }, 100)
+  }
+
+  // 检查位置是否被占用（包括机器、动物、装饰品等）
+  const isPositionOccupied = (x: number, z: number, excludeId?: string): boolean => {
+    // 检查机器
+    const machineKey = `${Math.round(x)},${Math.round(z)}`
+    if (placedMachines.has(machineKey)) {
+      return true
+    }
+
+    // 检查动物（使用距离判断）
+    for (const animal of animals) {
+      if (excludeId && animal.id === excludeId) continue
+      const dx = animal.position[0] - x
+      const dz = animal.position[2] - z
+      const distance = Math.sqrt(dx * dx + dz * dz)
+      if (distance < 1.0) { // 1个单位内认为有碰撞
+        return true
+      }
+    }
+
+    // 检查装饰品
+    for (const decoration of placedDecorations.values()) {
+      if (excludeId && decoration.id === excludeId) continue
+      const dx = decoration.position[0] - x
+      const dz = decoration.position[2] - z
+      const distance = Math.sqrt(dx * dx + dz * dz)
+      if (distance < 1.0) {
+        return true
+      }
+    }
+
+    return false
+  }
+
+  // 查找最近的空闲位置
+  const findNearestEmptyPosition = (startX: number, startZ: number, excludeId?: string): [number, number, number] | null => {
+    // 螺旋式搜索：从小到大扩展搜索半径
+    const maxRadius = 10 // 最大搜索半径
+    const step = 0.5     // 搜索步长
+
+    for (let radius = step; radius <= maxRadius; radius += step) {
+      // 搜索当前圆周上的点
+      const points = 8 * Math.ceil(radius) // 圆周上的点数随半径增加
+      for (let i = 0; i < points; i++) {
+        const angle = (i / points) * Math.PI * 2
+        const x = startX + Math.cos(angle) * radius
+        const z = startZ + Math.sin(angle) * radius
+
+        if (!isPositionOccupied(x, z, excludeId)) {
+          return [x, 0, z]
+        }
+      }
+    }
+
+    // 如果周围都满了，返回null
+    return null
+  }
+
+  // 放置机器
+  const handlePlaceMachine = (position: [number, number, number], machineTypeOverride?: MachineType) => {
+    // 使用传入的机器类型，或使用当前正在放置的机器类型
+    const machineType = machineTypeOverride || placingMachine
+    if (!machineType) return
+
+    const config = getMachineConfig(machineType)
+
+    // 将位置对齐到网格
+    let alignedX = Math.round(position[0])
+    let alignedZ = Math.round(position[2])
+
+    // 检查该位置是否已有机器，如果有，自动偏移到附近空闲位置
+    const machineKey = `${alignedX},${alignedZ}`
+    if (placedMachines.has(machineKey) || isPositionOccupied(alignedX, alignedZ)) {
+      // 查找最近的空闲位置
+      const emptyPosition = findNearestEmptyPosition(alignedX, alignedZ)
+      if (!emptyPosition) {
+        setMessage('⚠️ 周围没有空闲位置')
+        return
+      }
+      alignedX = Math.round(emptyPosition[0])
+      alignedZ = Math.round(emptyPosition[2])
+    }
+
+    const posKey = `${alignedX},${alignedZ}`
+
+    // 创建新机器实例
+    const newMachine: PlacedMachine = {
+      id: posKey,
+      machineType: machineType,
+      position: [alignedX, 0, alignedZ],
+      processing: false
+    }
+
+    setPlacedMachines((prev) => new Map(prev).set(posKey, newMachine))
+    setPlacingMachine(null)
+    setMessage(`✅ 放置了${config.name}`)
+  }
+
+  // 收起机器
+  const handleRemoveMachine = (machineId: string) => {
+    const machine = placedMachines.get(machineId)
+    if (!machine) return
+
+    const config = getMachineConfig(machine.machineType)
+
+    // 从机器列表中移除
+    setPlacedMachines((prev) => {
+      const updated = new Map(prev)
+      updated.delete(machineId)
+      return updated
+    })
+
+    // 返还到背包
+    addItemToInventory(machine.machineType, 1)
+
+    setMessage(`✅ 已收起${config.name}`)
+  }
+
+  // 开始机器加工
+  const handleStartProcessing = (machineId: string, recipeId: string, count: number = 1) => {
+    const machine = placedMachines.get(machineId)
+    if (!machine) return
+
+    const recipe = getRecipe(machine.machineType, recipeId)
+    if (!recipe) return
+
+    // 直接使用 inventorySlots（hotbarSlots 是它的前8个，不需要拼接）
+    let fullInventory = [...inventorySlots]
+
+    // 根据count数量，重复检查和扣除材料
+    for (let i = 0; i < count; i++) {
+      // 每次都检查材料是否足够
+      if (!hasEnoughIngredients(fullInventory, recipe.ingredients)) {
+        setMessage(`❌ 材料不足（已完成 ${i}/${count} 次）`)
+        return
+      }
+
+      // 扣除材料
+      fullInventory = consumeIngredients(fullInventory, recipe.ingredients)
+    }
+
+    // 更新整个背包（快捷栏会自动从前8个槽位派生）
+    setInventorySlots(fullInventory)
+
+    // 开始加工
+    const now = Date.now()
+    const processEndTime = now + recipe.processTime * 1000
+
+    setPlacedMachines((prev) => {
+      const updated = new Map(prev)
+      const updatedMachine = { ...machine }
+      updatedMachine.processing = true
+      updatedMachine.recipeId = recipeId
+      updatedMachine.processStartTime = now
+      updatedMachine.processEndTime = processEndTime
+      updatedMachine.processedCount = count  // 保存加工次数
+      updated.set(machineId, updatedMachine)
+      return updated
+    })
+
+    const totalCount = count * recipe.outputCount
+    setMessage(`🔥 开始研磨 ${count} 次，需要 ${recipe.processTime} 秒，产出 ${totalCount} 个${recipe.name}`)
+  }
+
+  // 收取成品
+  const handleCollectProduct = (machineId: string) => {
+    const machine = placedMachines.get(machineId)
+    if (!machine || !machine.recipeId) return
+
+    const recipe = getRecipe(machine.machineType, machine.recipeId)
+    if (!recipe) return
+
+    // 获取加工次数，如果没有则默认为1
+    const processedCount = machine.processedCount || 1
+    const totalCount = processedCount * recipe.outputCount
+
+    console.log('📦 收取成品 - processedCount:', processedCount, 'recipe.outputCount:', recipe.outputCount, 'total:', totalCount)
+    console.log('📦 机器信息:', machine)
+
+    // 添加成品到背包（使用总数量）
+    addItemToInventory(recipe.output as any, totalCount)
+
+    // 延迟检查背包状态
+    setTimeout(() => {
+      console.log('📦 延迟检查 - 当前背包槽数:', inventorySlots.length)
+      const flourSlots = inventorySlots.filter((slot, idx) => {
+        const hasFlour = (slot as any).foodType === 'flour'
+        if (hasFlour) {
+          console.log(`📦 槽位${idx}有面粉:`, slot)
+        }
+        return hasFlour
+      })
+      console.log('📦 背包中面粉槽数:', flourSlots.length)
+    }, 100)
+
+    // 清除加工状态
+    setPlacedMachines((prev) => {
+      const updated = new Map(prev)
+      const updatedMachine = { ...machine }
+      updatedMachine.processing = false
+      updatedMachine.recipeId = undefined
+      updatedMachine.processStartTime = undefined
+      updatedMachine.processEndTime = undefined
+      updatedMachine.processedCount = undefined
+      updated.set(machineId, updatedMachine)
+      return updated
+    })
+
+    const foodConfig = FOOD_ITEMS[recipe.output]
+    setMessage(`✅ 获得了${foodConfig.icon} ${foodConfig.name} x${totalCount}`)
+    setShowMachinePanel(false)
+    setSelectedMachine(null)
+    // 设置冷却期，防止立即重新打开
+    setMachinePanelCooldown(true)
+    setTimeout(() => {
+      setMachinePanelCooldown(false)
+    }, 500) // 500ms冷却时间
+    // 重新获取指针锁定，恢复游戏控制
+    const canvas = document.querySelector('canvas')
+    if (canvas && !showInventory && !showShop && !showColorPanel && !showShortcutHelp) {
+      canvas.requestPointerLock()
+    }
   }
 
   // 收起动物
@@ -707,6 +1271,13 @@ function FarmScene3D() {
 
     const stageText = animal.growthStage === 'baby' ? '幼崽' : animal.growthStage === 'growing' ? '成长中' : '成年'
     setMessage(`✅ 已收起${config.name}（${stageText}）`)
+  }
+
+  // 处理动物状态更新（从PlacedAnimal组件回调）
+  const handleAnimalUpdate = (updatedAnimal: PlacedAnimal) => {
+    setAnimals((prev) =>
+      prev.map((a) => (a.id === updatedAnimal.id ? updatedAnimal : a))
+    )
   }
 
   // 动物生长系统（定时器）
@@ -733,20 +1304,60 @@ function FarmScene3D() {
             }
           }
 
-          // 2. 检查饥饿
-          if (isAnimalHungry(animal)) {
-            const hungerDamage = config.needs.hungerDamage
-            newAnimal.hunger = Math.min(100, animal.hunger + hungerDamage)
-            newAnimal.health = Math.max(0, animal.health - hungerDamage)
+          // 2. 检查饥饿（简化逻辑：只在过去hungerRate时间没喂食时扣一次血）
+          const timeSinceLastFed = currentTime - animal.lastFed
+
+          // 初始化或获取上次饥饿检查时间（如果不存在，使用当前时间，避免一次性扣很多血）
+          let lastHungerCheck = (animal as any).lastHungerCheck
+          if (!lastHungerCheck || lastHungerCheck < animal.lastFed) {
+            lastHungerCheck = animal.lastFed
+            newAnimal.lastHungerCheck = lastHungerCheck as any
+          }
+
+          // 计算上次检查以来经过了多少个完整的饥饿周期
+          const intervalsSinceLastCheck = Math.floor((currentTime - lastHungerCheck) / config.needs.hungerRate)
+
+          // 调试输出
+          if (config.name === '鸡' && intervalsSinceLastCheck > 0) {
+            console.log(`🐔 鸡的健康检查:`, {
+              timeSinceLastFed: Math.floor(timeSinceLastFed / 1000) + '秒',
+              timeSinceHungerCheck: Math.floor((currentTime - lastHungerCheck) / 1000) + '秒',
+              lastHungerCheck: lastHungerCheck === animal.lastFed ? '初始时间' : '上次检查',
+              intervalsSinceLastCheck,
+              currentHealth: animal.health,
+              hungerRate_raw: config.needs.hungerRate,
+              hungerRate_display: Math.floor(config.needs.hungerRate / 1000) + '秒',
+              damage: intervalsSinceLastCheck * config.needs.hungerDamage,
+              config_needs: config.needs
+            })
+          }
+
+          // 如果有新的完整周期，扣血
+          if (intervalsSinceLastCheck > 0 && timeSinceLastFed >= config.needs.hungerRate) {
+            const totalDamage = intervalsSinceLastCheck * config.needs.hungerDamage
+            newAnimal.health = Math.max(0, animal.health - totalDamage)
+            newAnimal.hunger = Math.min(100, animal.hunger + intervalsSinceLastCheck * 10)
+            newAnimal.lastHungerCheck = currentTime as any  // 更新检查时间
 
             if (newAnimal.health <= 0 && animal.health > 0) {
               // 动物饿死
+              console.log(`💔 ${config.name}饿死了！存活时间: ${Math.floor(timeSinceLastFed / 1000)}秒`)
               setMessage(`💔 ${config.name}饿死了...`)
               hasChanges = true
-            } else if (animal.hunger < 30) {
+            } else if (newAnimal.health < 30 && animal.health >= 30) {
               // 饥饿警告
+              setMessage(`⚠️ ${config.name}非常饿了！`)
+
+              // 播放警告音效（只在第一次警告时）
+              if (animal.health >= 30) {
+                audioManager.playInteractionSound('warning')
+              }
+
               hasChanges = true
             }
+          } else if (timeSinceLastFed >= config.needs.hungerRate) {
+            // 已经饿了但还没到下一个扣血周期
+            newAnimal.hunger = Math.min(100, 50 + Math.floor((timeSinceLastFed / config.needs.hungerRate) * 20))
           }
 
           // 3. 成年动物产出检查
@@ -764,6 +1375,10 @@ function FarmScene3D() {
               setDroppedItems((prevItems) => [...prevItems, droppedItem])
               newAnimal.lastProduct = currentTime
               setMessage(`🎁 ${config.name}产出了${product.type === 'egg' ? '鸡蛋' : product.type === 'milk' ? '牛奶' : '羊毛'}！`)
+
+              // 播放产出音效
+              audioManager.playInteractionSound('product')
+
               hasChanges = true
             }
           }
@@ -779,6 +1394,148 @@ function FarmScene3D() {
     }, 1000) // 每秒检查一次
 
     return () => clearInterval(growthInterval)
+  }, [])
+
+  // 动物移动决策系统（每500ms检查一次是否需要移动）
+  useEffect(() => {
+    const moveDecisionInterval = setInterval(() => {
+      const currentTime = Date.now()
+
+      setAnimals((prev) => {
+        let hasChanges = false
+
+        const updated = prev.map((animal) => {
+          const config = ANIMAL_CONFIGS[animal.animalId]
+          let newAnimal = { ...animal }
+
+          // 检查是否在休息期
+          const isResting = animal.restUntil && currentTime < animal.restUntil
+
+          // 如果正在移动，不需要决策
+          if (animal.isMoving) {
+            return newAnimal
+          }
+
+          // 如果在休息期，不需要决策
+          if (isResting) {
+            return newAnimal
+          }
+
+          // 检查是否应该做出新的移动决策
+          const timeSinceLastMove = currentTime - (animal.lastMoveTime || currentTime)
+          const shouldMakeDecision = timeSinceLastMove >= config.movement.moveIntervalMax
+
+          if (shouldMakeDecision) {
+            // 70% 概率移动，30% 概率休息
+            const shouldMove = Math.random() < 0.7
+
+            if (shouldMove) {
+              // 决定移动，尝试找到一个未被占用的目标位置
+              let foundValidTarget = false
+              let attempts = 0
+              const maxAttempts = 10 // 最多尝试10次
+
+              while (!foundValidTarget && attempts < maxAttempts) {
+                const angle = Math.random() * Math.PI * 2 // 随机方向
+                const distance = 0.5 + Math.random() * (config.movement.moveDistance - 0.5) // 随机距离
+
+                const targetX = animal.position[0] + Math.cos(angle) * distance
+                const targetZ = animal.position[2] + Math.sin(angle) * distance
+
+                // 检查目标位置是否被占用（排除自己）
+                if (!isPositionOccupied(targetX, targetZ, animal.id)) {
+                  newAnimal.targetPosition = [targetX, animal.position[1], targetZ]
+                  newAnimal.isMoving = true
+                  newAnimal.lastMoveTime = currentTime
+                  foundValidTarget = true
+                  hasChanges = true
+                }
+
+                attempts++
+              }
+
+              // 如果尝试多次都找不到有效位置，选择休息
+              if (!foundValidTarget) {
+                const restDuration = config.movement.restTimeMin +
+                  Math.random() * (config.movement.restTimeMax - config.movement.restTimeMin)
+
+                newAnimal.restUntil = currentTime + restDuration
+                newAnimal.lastMoveTime = currentTime
+                hasChanges = true
+              }
+            } else {
+              // 决定休息
+              const restDuration = config.movement.restTimeMin +
+                Math.random() * (config.movement.restTimeMax - config.movement.restTimeMin)
+
+              newAnimal.restUntil = currentTime + restDuration
+              newAnimal.lastMoveTime = currentTime
+              hasChanges = true
+            }
+          }
+
+          return newAnimal
+        })
+
+        return hasChanges ? updated : prev
+      })
+    }, 500) // 每500毫秒检查一次
+
+    return () => clearInterval(moveDecisionInterval)
+  }, [])
+
+  // 动物声音系统（每500ms检查一次是否需要叫）
+  useEffect(() => {
+    const soundInterval = setInterval(() => {
+      const currentTime = Date.now()
+
+      setAnimals((prev) => {
+        let hasChanges = false
+
+        const updated = prev.map((animal) => {
+          const config = ANIMAL_CONFIGS[animal.animalId]
+          let newAnimal = { ...animal }
+
+          // 检查是否到了可以叫的时间
+          if (currentTime >= (animal.nextSoundTime || 0)) {
+            // 根据概率决定是否叫
+            if (Math.random() < config.sound.callProbability) {
+              // 计算玩家到动物的距离
+              const currentPlayerPos = playerPositionRef.current
+              const dx = animal.position[0] - currentPlayerPos[0]
+              const dz = animal.position[2] - currentPlayerPos[2]
+              const distance = Math.sqrt(dx * dx + dz * dz)
+
+              // 只在玩家听觉范围内（15个单位）播放声音
+              if (distance < 15) {
+                audioManager.playAnimalSound(animal.animalId, distance)
+
+                // 计算下次可以叫的时间
+                const nextInterval = config.sound.callIntervalMin +
+                  Math.random() * (config.sound.callIntervalMax - config.sound.callIntervalMin)
+
+                newAnimal.lastSoundTime = currentTime
+                newAnimal.nextSoundTime = currentTime + nextInterval
+                hasChanges = true
+              }
+            } else {
+              // 即使不叫，也要更新下次检查时间
+              const nextInterval = config.sound.callIntervalMin +
+                Math.random() * (config.sound.callIntervalMax - config.sound.callIntervalMin)
+
+              newAnimal.nextSoundTime = currentTime + nextInterval
+              hasChanges = true
+            }
+          }
+
+          return newAnimal
+        })
+
+        return hasChanges ? updated : prev
+      })
+    }, 500) // 每500毫秒检查一次
+
+    return () => clearInterval(soundInterval)
   }, [])
 
   // 树木生长和成熟检测（每2秒检查一次）
@@ -814,11 +1571,277 @@ function FarmScene3D() {
 
     return () => clearInterval(treeCheckInterval)
   }, [])
-  // 动物右键交互
+
+  // 机器加工完成检测（每秒检查一次）
+  useEffect(() => {
+    const processingInterval = setInterval(() => {
+      setPlacedMachines((prev) => {
+        const currentTime = Date.now()
+        let hasChanges = false
+
+        const updated = new Map(prev)
+
+        updated.forEach((machine, machineId) => {
+          // 检查正在加工的机器
+          if (machine.processing && machine.processEndTime) {
+            if (currentTime >= machine.processEndTime) {
+              // 加工完成
+              const updatedMachine = { ...machine }
+              updatedMachine.processing = false // 停止加工状态
+              updated.set(machineId, updatedMachine)
+              hasChanges = true
+
+              const recipe = getRecipe(machine.machineType, machine.recipeId!)
+              if (recipe) {
+                setMessage(`✅ ${recipe.name}制作完成！点击机器收取成品`)
+              }
+            }
+          }
+        })
+
+        return hasChanges ? updated : prev
+      })
+    }, 1000) // 每秒检查一次
+
+    return () => clearInterval(processingInterval)
+  }, [])
+
+  // 开发者工具系统（用于测试）
+  useEffect(() => {
+    // 只在开发模式下启用
+    if (process.env.NODE_ENV !== 'production') {
+      // @ts-ignore
+      window.devTools = {
+        // 添加物品到背包
+        addItem: (itemType: string, itemId: string, count: number) => {
+          addItemToInventory(itemId as any, count)
+          setMessage(`🔧 [开发者] 已添加 ${itemId} x${count}`)
+        },
+
+        // 添加金币
+        addGold: (amount: number) => {
+          setGold((prev) => prev + amount)
+          setMessage(`🔧 [开发者] 已添加 ${amount} 金币`)
+        },
+
+        // 设置金币
+        setGold: (amount: number) => {
+          setGold(amount)
+          setMessage(`🔧 [开发者] 金币已设置为 ${amount}`)
+        },
+
+        // 解锁所有作物
+        unlockAllCrops: () => {
+          const allCrops: CropType[] = ['wheat', 'carrot', 'potato', 'tomato', 'corn', 'strawberry']
+          setUnlockedCrops(allCrops)
+          setMessage(`🔧 [开发者] 已解锁所有作物`)
+        },
+
+        // 设置体力
+        setStamina: (amount: number) => {
+          setStamina(amount)
+          setMessage(`🔧 [开发者] 体力已设置为 ${amount}`)
+        },
+
+        // 添加机器到背包
+        addMachine: (machineType: MachineType) => {
+          addItemToInventory(machineType as any, 1)
+          setMessage(`🔧 [开发者] 已添加 ${machineType}`)
+        },
+
+        // 完成当前机器的加工
+        completeMachineProcessing: (machineId: string) => {
+          setPlacedMachines((prev) => {
+            const updated = new Map(prev)
+            const machine = updated.get(machineId)
+            if (machine && machine.processing) {
+              const updatedMachine = { ...machine }
+              updatedMachine.processing = false
+              updatedMachine.processEndTime = Date.now() - 1000 // 设置为已完成
+              updated.set(machineId, updatedMachine)
+              setMessage(`🔧 [开发者] 机器加工已完成`)
+            }
+            return updated
+          })
+        },
+
+        // 获取当前游戏状态
+        getState: () => {
+          return {
+            gold,
+            stamina,
+            satiety,
+            hotbarSlots,
+            inventorySlots,
+            placedMachines: Array.from(placedMachines.entries()),
+            unlockedCrops
+          }
+        }
+      }
+
+      console.log('%c🔧 开发者工具已启用', 'color: #00ff00; font-size: 14px; font-weight: bold')
+      console.log('%c使用方法:', 'color: #ffd700; font-size: 12px')
+      console.log('  devTools.addItem(itemType, itemId, count)  - 添加物品')
+      console.log('  devTools.addGold(amount)                   - 添加金币')
+      console.log('  devTools.addMachine(machineType)           - 添加机器')
+      console.log('  devTools.unlockAllCrops()                  - 解锁所有作物')
+      console.log('  devTools.setStamina(amount)                - 设置体力')
+      console.log('  devTools.getState()                        - 获取游戏状态')
+      console.log('%c示例:', 'color: #ffd700; font-size: 12px')
+      console.log('  devTools.addGold(1000)')
+      console.log('  devTools.addItem("crop", "wheat", 20)')
+      console.log('  devTools.addMachine("machine_grinder")')
+    }
+  }, [])
+
+  // 动物左键交互（喂养）
+  const handleAnimalClick = (animal: PlacedAnimal) => {
+    const selectedItem = inventorySlots[selectedHotbarSlot]
+
+    // 检查是否拿着饲料
+    if (!selectedItem || isEmpty(selectedItem)) {
+      setMessage('❌ 手拿饲料才能喂养动物')
+      return
+    }
+
+    const config = ANIMAL_CONFIGS[animal.animalId]
+    const canFeed = config.needs.foods.some(food => {
+      // 检查是否是匹配的饲料
+      if (selectedItem.itemType === 'crop') {
+        return food === selectedItem.cropType
+      }
+      if (selectedItem.itemType === 'item') {
+        return food === selectedItem.id
+      }
+      return false
+    })
+
+    if (!canFeed) {
+      setMessage(`❌ ${config.name}不吃这个，需要：${config.needs.foods.join(', ')}`)
+      return
+    }
+
+    // 喂养成功
+    setAnimals(prev => prev.map(a => {
+      if (a.id === animal.id) {
+        const updated = { ...a }
+        updated.lastFed = Date.now()
+        updated.hunger = 100
+        updated.happiness = Math.min(100, a.happiness + 20)
+        return updated
+      }
+      return a
+    }))
+
+    // 消耗1个饲料
+    const newCount = selectedItem.count - 1
+    if (newCount <= 0) {
+      updateHotbarSlot(selectedHotbarSlot, createEmptyStack())
+    } else {
+      updateHotbarSlot(selectedHotbarSlot, { ...selectedItem, count: newCount })
+    }
+
+    setMessage(`✅ 喂养了${config.name}！`)
+    audioManager.playInteractionSound('success')
+  }
+
+  // 动物右键交互（击杀）
   const handleAnimalRightClick = (animal: PlacedAnimal) => {
-    // TODO: 打开动物交互面板（后续实现）
-    // 现在先简单处理：直接收起
-    handleRemoveAnimal(animal)
+    const selectedItem = inventorySlots[selectedHotbarSlot]
+
+    // 检查是否拿着镰刀
+    if (!selectedItem || isEmpty(selectedItem) || selectedItem.toolType !== 'sickle') {
+      setMessage('❌ 需要手持镰刀才能击杀动物')
+      return
+    }
+
+    const config = ANIMAL_CONFIGS[animal.animalId]
+
+    // 第一次攻击：造成伤害
+    if (animal.health > 50) {
+      setAnimals(prev => prev.map(a => {
+        if (a.id === animal.id) {
+          const updated = { ...a, health: 50 }
+          return updated
+        }
+        return a
+      }))
+      setMessage(`⚔️ 击中了${config.name}！造成伤害（再点一次击杀）`)
+      audioManager.playInteractionSound('hit')
+      return
+    }
+
+    // 第二次攻击：击杀
+    // 掉落对应动物的肉
+    let meatType: 'pork' | 'beef' | 'chicken_meat' | 'mutton'
+    let meatName: string
+
+    if (animal.animalId === 'pig') {
+      meatType = 'pork'
+      meatName = '猪肉'
+    } else if (animal.animalId === 'cow') {
+      meatType = 'beef'
+      meatName = '牛肉'
+    } else if (animal.animalId === 'chicken') {
+      meatType = 'chicken_meat'
+      meatName = '鸡肉'
+    } else {
+      meatType = 'mutton'
+      meatName = '羊肉'
+    }
+
+    const meatAmount = animal.animalId === 'pig' ? 3 : animal.animalId === 'cow' ? 2 : animal.animalId === 'chicken' ? 1 : 2
+    const droppedItem = {
+      id: `${meatType}_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`,
+      type: meatType as any,
+      position: [animal.position[0], 0, animal.position[2]] as [number, number, number],
+      count: meatAmount
+    }
+    setDroppedItems(prev => [...prev, droppedItem])
+
+    // 移除动物
+    setAnimals(prev => prev.filter(a => a.id !== animal.id))
+
+    setMessage(`💀 击杀了${config.name}！获得 ${meatAmount} 个${meatName}`)
+    audioManager.playInteractionSound('kill')
+  }
+
+  // 机器左键交互（打开机器面板）
+  const handleMachineClick = (machineId: string) => {
+    console.log('🎯 [Test3DGame] handleMachineClick triggered')
+    console.log('🎯 [Test3DGame] showMachinePanel:', showMachinePanel)
+    console.log('🎯 [Test3DGame] machinePanelCooldown:', machinePanelCooldown)
+    console.log('🎯 [Test3DGame] pointerLockElement:', document.pointerLockElement)
+
+    // 如果面板已经打开或处于冷却期，不要重新打开
+    if (showMachinePanel || machinePanelCooldown) {
+      console.log('🎯 [Test3DGame] Blocked: panel open or cooldown')
+      return
+    }
+
+    // 立即退出指针锁定，让鼠标可以点击UI
+    document.exitPointerLock()
+    console.log('🎯 [Test3DGame] exitPointerLock called')
+
+    setSelectedMachine(machineId)
+    console.log('🎯 [Test3DGame] selectedMachine set to:', machineId)
+
+    setShowMachinePanel(true)
+    console.log('🎯 [Test3DGame] showMachinePanel set to true')
+  }
+
+  // 机器面板：开始加工
+  const handleMachinePanelStartProcessing = (recipeId: string, count: number) => {
+    if (selectedMachine) {
+      handleStartProcessing(selectedMachine, recipeId, count)
+    }
+  }
+
+  // 机器面板：收取成品
+  const handleMachinePanelCollectProduct = () => {
+    if (selectedMachine) {
+      handleCollectProduct(selectedMachine)
+    }
   }
 
   // 购买材料
@@ -990,17 +2013,20 @@ function FarmScene3D() {
    * 使用单一状态更新，避免批处理冲突
    */
   const addItemToInventory = (
-    type: BlockType | CropType | ToolType | DecorationType | MachineType | AnimalType | SpecialType | FacilityType | AnimalProductType | TreeType | string,
+    type: BlockType | CropType | ToolType | DecorationType | MachineType | AnimalType | SpecialType | FacilityType | AnimalProductType | TreeType | FoodType | string,
     count: number
   ) => {
+    console.log('📦 addItemToInventory - type:', type, 'count:', count)
     const newStack = createStack(type as any, count)
     if (!newStack) {
-      console.error('创建物品堆叠失败:', type)
+      console.error('❌ 创建物品堆叠失败:', type)
       return
     }
+    console.log('✅ 创建物品成功:', newStack)
 
     // 使用单一状态更新，一次性处理所有逻辑
     setInventorySlots((prev) => {
+      console.log('📦 当前背包槽位数:', prev.length)
       const newSlots = [...prev]
       let remainingCount = count
 
@@ -1012,6 +2038,7 @@ function FarmScene3D() {
             const canAdd = Math.min(remainingCount, merged.maxStack - newSlots[i].count)
             newSlots[i] = { ...newSlots[i], count: newSlots[i].count + canAdd }
             remainingCount -= canAdd
+            console.log(`✅ 堆叠到快捷栏槽位${i}，添加${canAdd}个，剩余${remainingCount}个`)
           }
         }
       }
@@ -1023,6 +2050,7 @@ function FarmScene3D() {
           if (stack) {
             newSlots[i] = stack
             remainingCount -= stack.count
+            console.log(`✅ 放入主背包槽位${i}，添加${stack.count}个，剩余${remainingCount}个`)
           }
         } else if (canStack(newSlots[i], newStack)) {
           const merged = mergeStacks(newSlots[i], newStack)
@@ -1030,10 +2058,12 @@ function FarmScene3D() {
             const canAdd = Math.min(remainingCount, merged.maxStack - newSlots[i].count)
             newSlots[i] = { ...newSlots[i], count: newSlots[i].count + canAdd }
             remainingCount -= canAdd
+            console.log(`✅ 堆叠到主背包槽位${i}，添加${canAdd}个，剩余${remainingCount}个`)
           }
         }
       }
 
+      console.log('📦 最终背包槽位数:', newSlots.length)
       return newSlots
     })
   }
@@ -1170,11 +2200,88 @@ function FarmScene3D() {
 
     if (isEmpty(stack)) return
 
+    // 如果是食物，食用
+    if ((stack as any).foodType && FOOD_ITEMS[(stack as any).foodType as FoodType]) {
+      const foodType = (stack as any).foodType as FoodType
+      const foodConfig = FOOD_ITEMS[foodType]
+
+      // 恢复体力
+      const staminaRestore = foodConfig.staminaRestore
+      setStamina((prev) => Math.min(maxStamina, prev + staminaRestore))
+
+      // 恢复饱食度
+      setSatiety((prev) => Math.min(100, prev + foodConfig.satiety))
+
+      // 应用增益效果
+      if (foodConfig.buff) {
+        const now = Date.now()
+        setActiveBuffs((prev) => [
+          ...prev,
+          {
+            type: foodConfig.buff!.type,
+            value: foodConfig.buff!.value,
+            endTime: now + foodConfig.buff!.duration * 1000
+          }
+        ])
+      }
+
+      // 消耗1个食物
+      const updateSlots = (targetSlots: ItemStack[]) => {
+        const newSlots = [...targetSlots]
+        if (newSlots[slotIndex].count > 1) {
+          newSlots[slotIndex] = {
+            ...newSlots[slotIndex],
+            count: newSlots[slotIndex].count - 1
+          }
+        } else {
+          newSlots[slotIndex] = createEmptyStack()
+          newSlots[slotIndex].id = ''
+        }
+        return newSlots
+      }
+
+      if (isHotbar) {
+        setInventorySlots(updateSlots)
+      } else {
+        setInventorySlots(updateSlots)
+      }
+
+      let buffText = ''
+      if (foodConfig.buff) {
+        buffText = `，获得${foodConfig.buff.type === 'speed' ? '速度' : foodConfig.buff.type === 'efficiency' ? '效率' : '幸运'}+${foodConfig.buff.value}%增益`
+      }
+
+      setMessage(`😋 食用了${foodConfig.icon} ${foodConfig.name}，恢复${staminaRestore}体力${buffText}`)
+      return
+    }
+
     // 如果是工具，切换当前工具
     if (stack.itemType === 'tool' && stack.toolType) {
       setSelectedHotbarSlot(isHotbar ? slotIndex : selectedHotbarSlot)
       setMessage(`✅ 切换到 ${stack.name}`)
     }
+  }
+
+  // 处理装饰品拆除
+  const handleDecorationRemove = (decorationId: string) => {
+    const decoration = placedDecorations.get(decorationId)
+    if (!decoration) return
+
+    // 查找装饰品的配置
+    const decorConfig = ITEM_CONFIG[decoration.decorationType]
+    if (!decorConfig) return
+
+    // 返回物品到背包（直接传入类型和数量）
+    addItemToInventory(decoration.decorationType, 1)
+
+    // 从装饰品列表中移除
+    setPlacedDecorations((prev) => {
+      const newMap = new Map(prev)
+      newMap.delete(decorationId)
+      return newMap
+    })
+
+    setMessage(`✅ 拆除了 ${decorConfig.name}`)
   }
 
   // 处理地块点击（使用射线检测）
@@ -1187,18 +2294,47 @@ function FarmScene3D() {
       return
     }
 
-    // 如果在建造模式，放置方块
-    if (buildMode) {
-      handlePlaceBlock([x, y, z])
+    // 如果正在放置机器
+    if (placingMachine) {
+      handlePlaceMachine([x, y, z])
       return
     }
 
     // 获取当前选中的快捷栏槽位物品
-    const selectedItem = hotbarSlots[selectedHotbarSlot]
+    const selectedItem = inventorySlots[selectedHotbarSlot]
+
+    // 如果选中的是方块，放置方块
+    if (selectedItem.itemType === 'block') {
+      handlePlaceBlock([x, y, z])
+      return
+    }
 
     // 检查选中的是否是可放置的动物
     if (selectedItem.itemType === 'animal' && (selectedItem as any).animalType) {
       const animalItem = (selectedItem as any).animalType as string
+
+      // 检查是否是设施（鸡舍、牛棚）
+      if (animalItem === 'facility_chicken_coop' || animalItem === 'facility_barn') {
+        // 放置设施
+        handlePlaceFacility([x, y, z], animalItem as any)
+
+        // 消耗1个设施
+        setInventorySlots((prev) => {
+          const newSlots = [...prev]
+          if (newSlots[selectedHotbarSlot].count > 1) {
+            newSlots[selectedHotbarSlot] = {
+              ...newSlots[selectedHotbarSlot],
+              count: newSlots[selectedHotbarSlot].count - 1
+            }
+          } else {
+            newSlots[selectedHotbarSlot] = createEmptyStack()
+            newSlots[selectedHotbarSlot].id = ''
+          }
+          return newSlots
+        })
+        return
+      }
+
       // 只有实际的动物可以放置（排除饲料、干草、设施）
       const placeableAnimals = ['animal_chicken', 'animal_cow', 'animal_sheep', 'animal_pig']
 
@@ -1209,6 +2345,31 @@ function FarmScene3D() {
         handlePlaceAnimal([x, y, z], baseAnimalType)
 
         // 消耗1个动物（快捷栏就是背包前8个槽位）
+        setInventorySlots((prev) => {
+          const newSlots = [...prev]
+          if (newSlots[selectedHotbarSlot].count > 1) {
+            newSlots[selectedHotbarSlot] = {
+              ...newSlots[selectedHotbarSlot],
+              count: newSlots[selectedHotbarSlot].count - 1
+            }
+          } else {
+            newSlots[selectedHotbarSlot] = createEmptyStack()
+            newSlots[selectedHotbarSlot].id = ''
+          }
+          return newSlots
+        })
+        return
+      }
+    }
+
+    // 检查选中的是否是可放置的机器
+    if (selectedItem.itemType === 'machine') {
+      const machineType = (selectedItem as any).machineType as MachineType
+      if (machineType) {
+        // 放置机器
+        handlePlaceMachine([x, y, z], machineType)
+
+        // 消耗1个机器（快捷栏就是背包前8个槽位）
         setInventorySlots((prev) => {
           const newSlots = [...prev]
           if (newSlots[selectedHotbarSlot].count > 1) {
@@ -1239,12 +2400,58 @@ function FarmScene3D() {
     // 创建位置key
     const posKey = `${alignedX},${alignedZ}`
 
+    // 检查选中的是否是可放置的装饰品（必须在 alignedX/alignedZ 定义之后）
+    if (selectedItem.itemType === 'decoration') {
+      const decorationType = (selectedItem as any).decorationType
+      if (decorationType) {
+        // 检查该位置是否已有装饰品
+        if (placedDecorations.has(posKey)) {
+          setMessage('❌ 该位置已有装饰品！')
+          return
+        }
+
+        // 放置装饰品
+        const newDecoration = {
+          id: posKey,
+          decorationType: decorationType as 'decor_table' | 'decor_chair' | 'decor_bed' | 'decor_cabinet' | 'decor_flowerpot' | 'decor_painting',
+          position: [alignedX, y, alignedZ] as [number, number, number]
+        }
+
+        setPlacedDecorations((prev) => new Map(prev).set(posKey, newDecoration))
+
+        // 消耗1个装饰品（快捷栏就是背包前8个槽位）
+        setInventorySlots((prev) => {
+          const newSlots = [...prev]
+          if (newSlots[selectedHotbarSlot].count > 1) {
+            newSlots[selectedHotbarSlot] = {
+              ...newSlots[selectedHotbarSlot],
+              count: newSlots[selectedHotbarSlot].count - 1
+            }
+          } else {
+            newSlots[selectedHotbarSlot] = createEmptyStack()
+            newSlots[selectedHotbarSlot].id = ''
+          }
+          return newSlots
+        })
+
+        setMessage(`✅ 放置了 ${selectedItem.name}`)
+        return
+      }
+    }
+
     const newPlots = new Map(plots)
     const plot = newPlots.get(posKey)
 
     // 根据选中槽位的物品类型决定行为
     if (selectedItem.itemType === 'tool' && selectedItem.toolType === 'hoe') {
       // 锄头：开垦土地
+      // 检查体力
+      const STAMINA_COST_TILLING = 2
+      if (!hasEnoughStamina(STAMINA_COST_TILLING)) {
+        setMessage('⚠️ 体力不足！开垦土地需要2点体力')
+        return
+      }
+
       if (!plot) {
         // 创建新地块
         const grassBlockKey = `${alignedX},0,${alignedZ}`
@@ -1252,24 +2459,35 @@ function FarmScene3D() {
 
         newPlots.set(posKey, {
           state: 'tilled',
-          position: [alignedX, -0.95, alignedZ]
+          position: [alignedX, -0.95, alignedZ],
+          tilledTime: Date.now()  // 记录开垦时间
         })
-        setMessage('✅ 土地已开垦')
+        consumeStamina(STAMINA_COST_TILLING)
+        setMessage('✅ 土地已开垦 (-2体力)')
       } else if (plot.state === 'empty') {
         const grassBlockKey = `${alignedX},0,${alignedZ}`
         setMinedBlocks((prev) => new Set([...prev, grassBlockKey]))
 
         plot.state = 'tilled'
         plot.position[1] = -0.95
+        plot.tilledTime = Date.now()  // 记录开垦时间
         newPlots.set(posKey, plot)
-        setMessage('✅ 土地已开垦')
+        consumeStamina(STAMINA_COST_TILLING)
+        setMessage('✅ 土地已开垦 (-2体力)')
       }
     } else if (selectedItem.itemType === 'tool' && selectedItem.toolType === 'watering_can') {
       // 水壶：浇水
+      const STAMINA_COST_WATERING = 1
+      if (!hasEnoughStamina(STAMINA_COST_WATERING)) {
+        setMessage('⚠️ 体力不足！浇水需要1点体力')
+        return
+      }
+
       if (plot && (plot.state === 'tilled' || plot.state === 'planted')) {
         plot.state = plot.state === 'tilled' ? 'watered' : 'planted'
         newPlots.set(posKey, plot)
-        setMessage('✅ 土地已浇水')
+        consumeStamina(STAMINA_COST_WATERING)
+        setMessage('✅ 土地已浇水 (-1体力)')
       } else if (!plot) {
         setMessage('⚠️ 这里没有耕地，不能浇水')
       }
@@ -1412,7 +2630,31 @@ function FarmScene3D() {
         overflow: 'hidden'
       }}
     >
-      <Canvas camera={{ position: [0, 1.6, 5], fov: 75 }} shadows style={{ width: '100%', height: '100%' }}>
+      <Canvas
+        camera={{ position: [0, 1.6, 5], fov: 75 }}
+        shadows
+        style={{ width: '100%', height: '100%' }}
+        onPointerDown={(e) => {
+          // 当任何面板打开时（除了暂停菜单），完全阻止 Canvas 交互
+          const anyPanelOpen = showInventory || showShop || showColorPanel || showShortcutHelp || showMachinePanel
+          if (anyPanelOpen) {
+            e.stopPropagation()
+            e.preventDefault()
+            // 确保指针被解锁
+            if (document.pointerLockElement) {
+              document.exitPointerLock()
+            }
+            return
+          }
+        }}
+        onPointerMove={(e) => {
+          // 面板打开时也阻止鼠标移动事件（除了暂停菜单）
+          const anyPanelOpen = showInventory || showShop || showColorPanel || showShortcutHelp || showMachinePanel
+          if (anyPanelOpen) {
+            e.stopPropagation()
+          }
+        }}
+      >
         <Sky distance={450000} sunPosition={[100, 50, 100]} inclination={0.6} azimuth={0.25} />
 
         <ambientLight intensity={0.6} />
@@ -1428,7 +2670,7 @@ function FarmScene3D() {
         />
 
         {/* 射线检测系统：检测鼠标点击位置 */}
-        <GroundClickHandler onGroundClick={handlePlotClick} />
+        <GroundClickHandler onGroundClick={handlePlotClick} isLocked={isLocked} />
 
         {/* 玩家控制器 */}
         <FirstPersonController
@@ -1437,6 +2679,8 @@ function FarmScene3D() {
           onPlayerPositionChange={setPlayerPosition}
           onPlayerRotationChange={setPlayerRotation}
           onMovingChange={setIsMoving}
+          disabled={showInventory || showShop || showColorPanel || showShortcutHelp || showMachinePanel}
+          // 注意：showPauseMenu 不参与 disabled，因为暂停菜单需要 PointerLockControls 来开始游戏
         />
 
         {/* 玩家模型（第三人称时显示） */}
@@ -1449,11 +2693,25 @@ function FarmScene3D() {
         />
 
         {/* 建造预览 */}
-        <BuildPreview buildMode={buildMode} selectedMaterial={selectedMaterial} placedBlocks={placedBlocks} />
+        <BuildPreview
+          buildMode={!isEmpty(inventorySlots[selectedHotbarSlot]) && inventorySlots[selectedHotbarSlot].itemType === 'block'}
+          selectedItemType={!isEmpty(inventorySlots[selectedHotbarSlot]) && inventorySlots[selectedHotbarSlot].itemType === 'block' ? inventorySlots[selectedHotbarSlot].id : null}
+          placedItems={placedBlocks.map(b => ({ id: b.id, type: b.type, position: b.position }))}
+        />
 
         {/* 已放置的方块 */}
         {placedBlocks.map((block) => (
           <PlacedBlock key={block.id} block={block} onRemove={handleRemoveBlock} />
+        ))}
+
+        {/* 已放置的设施（鸡舍、牛棚） */}
+        {Array.from(placedFacilities.values()).map((facility) => (
+          <PlacedFacility
+            key={facility.id}
+            facilityType={facility.facilityType}
+            position={facility.position}
+            rotation={facility.rotation}
+          />
         ))}
 
         {/* 动物 */}
@@ -1461,9 +2719,282 @@ function FarmScene3D() {
           <PlacedAnimalComponent
             key={animal.id}
             animal={animal}
+            onClick={handleAnimalClick}
             onRightClick={handleAnimalRightClick}
+            onUpdate={handleAnimalUpdate}
           />
         ))}
+
+        {/* 机器 */}
+        {Array.from(placedMachines.values()).map((machine) => (
+          <PlacedMachineMesh
+            key={machine.id}
+            machine={machine}
+            isSelected={selectedMachine === machine.id}
+            onClick={() => handleMachineClick(machine.id)}
+          />
+        ))}
+
+        {/* 装饰品 */}
+        {Array.from(placedDecorations.values()).map((decoration) => {
+          // 根据装饰品类型获取图标
+          const getDecorationIcon = (type: string) => {
+            const icons: Record<string, string> = {
+              decor_table: '🪑',
+              decor_chair: '💺',
+              decor_bed: '🛏️',
+              decor_cabinet: '🗄️',
+              decor_flowerpot: '🪴',
+              decor_painting: '🖼️'
+            }
+            return icons[type] || '🎨'
+          }
+
+          // 根据装饰品类型渲染不同的3D模型
+          const renderDecoration = (decorationType: string) => {
+            switch (decorationType) {
+              case 'decor_bed':
+                return (
+                  <group>
+                    {/* 床垫 - 长方形扁平体 */}
+                    <mesh position={[0, 0.3, 0]}>
+                      <boxGeometry args={[2, 0.3, 1]} />
+                      <meshStandardMaterial color="#8B4513" />
+                    </mesh>
+                    {/* 床头板 - 竖立的板 */}
+                    <mesh position={[0, 0.6, -0.45]}>
+                      <boxGeometry args={[2, 0.6, 0.1]} />
+                      <meshStandardMaterial color="#A0522D" />
+                    </mesh>
+                    {/* 床脚 - 4个小方块 */}
+                    <mesh position={[-0.9, 0.15, -0.4]}>
+                      <boxGeometry args={[0.1, 0.3, 0.1]} />
+                      <meshStandardMaterial color="#654321" />
+                    </mesh>
+                    <mesh position={[0.9, 0.15, -0.4]}>
+                      <boxGeometry args={[0.1, 0.3, 0.1]} />
+                      <meshStandardMaterial color="#654321" />
+                    </mesh>
+                    <mesh position={[-0.9, 0.15, 0.4]}>
+                      <boxGeometry args={[0.1, 0.3, 0.1]} />
+                      <meshStandardMaterial color="#654321" />
+                    </mesh>
+                    <mesh position={[0.9, 0.15, 0.4]}>
+                      <boxGeometry args={[0.1, 0.3, 0.1]} />
+                      <meshStandardMaterial color="#654321" />
+                    </mesh>
+                  </group>
+                )
+              case 'decor_table':
+                return (
+                  <group>
+                    {/* 桌面 */}
+                    <mesh position={[0, 0.6, 0]}>
+                      <boxGeometry args={[1.5, 0.1, 1]} />
+                      <meshStandardMaterial color="#DEB887" />
+                    </mesh>
+                    {/* 桌腿 */}
+                    <mesh position={[-0.6, 0.3, -0.4]}>
+                      <boxGeometry args={[0.1, 0.6, 0.1]} />
+                      <meshStandardMaterial color="#8B4513" />
+                    </mesh>
+                    <mesh position={[0.6, 0.3, -0.4]}>
+                      <boxGeometry args={[0.1, 0.6, 0.1]} />
+                      <meshStandardMaterial color="#8B4513" />
+                    </mesh>
+                    <mesh position={[-0.6, 0.3, 0.4]}>
+                      <boxGeometry args={[0.1, 0.6, 0.1]} />
+                      <meshStandardMaterial color="#8B4513" />
+                    </mesh>
+                    <mesh position={[0.6, 0.3, 0.4]}>
+                      <boxGeometry args={[0.1, 0.6, 0.1]} />
+                      <meshStandardMaterial color="#8B4513" />
+                    </mesh>
+                  </group>
+                )
+              case 'decor_chair':
+                return (
+                  <group>
+                    {/* 座面 */}
+                    <mesh position={[0, 0.4, 0]}>
+                      <boxGeometry args={[0.6, 0.1, 0.6]} />
+                      <meshStandardMaterial color="#DEB887" />
+                    </mesh>
+                    {/* 靠背 */}
+                    <mesh position={[0, 0.7, -0.25]}>
+                      <boxGeometry args={[0.6, 0.4, 0.1]} />
+                      <meshStandardMaterial color="#CD853F" />
+                    </mesh>
+                    {/* 椅子腿 */}
+                    <mesh position={[-0.2, 0.2, -0.2]}>
+                      <boxGeometry args={[0.08, 0.4, 0.08]} />
+                      <meshStandardMaterial color="#8B4513" />
+                    </mesh>
+                    <mesh position={[0.2, 0.2, -0.2]}>
+                      <boxGeometry args={[0.08, 0.4, 0.08]} />
+                      <meshStandardMaterial color="#8B4513" />
+                    </mesh>
+                    <mesh position={[-0.2, 0.2, 0.2]}>
+                      <boxGeometry args={[0.08, 0.4, 0.08]} />
+                      <meshStandardMaterial color="#8B4513" />
+                    </mesh>
+                    <mesh position={[0.2, 0.2, 0.2]}>
+                      <boxGeometry args={[0.08, 0.4, 0.08]} />
+                      <meshStandardMaterial color="#8B4513" />
+                    </mesh>
+                  </group>
+                )
+              case 'decor_cabinet':
+                return (
+                  <group>
+                    {/* 柜体 */}
+                    <mesh position={[0, 0.6, 0]}>
+                      <boxGeometry args={[1, 1.2, 0.5]} />
+                      <meshStandardMaterial color="#A0522D" />
+                    </mesh>
+                    {/* 柜门 */}
+                    <mesh position={[0, 0.6, 0.26]}>
+                      <boxGeometry args={[0.45, 1.1, 0.05]} />
+                      <meshStandardMaterial color="#8B4513" />
+                    </mesh>
+                    <mesh position={[0, 0.6, -0.26]}>
+                      <boxGeometry args={[0.45, 1.1, 0.05]} />
+                      <meshStandardMaterial color="#8B4513" />
+                    </mesh>
+                  </group>
+                )
+              case 'decor_flowerpot':
+                return (
+                  <group>
+                    {/* 盆体 - 使用多个立方体模拟梯形 */}
+                    <mesh position={[0, 0.2, 0]}>
+                      <cylinderGeometry args={[0.35, 0.25, 0.4, 16]} />
+                      <meshStandardMaterial color="#CD853F" />
+                    </mesh>
+                    {/* 盆沿 */}
+                    <mesh position={[0, 0.41, 0]}>
+                      <cylinderGeometry args={[0.4, 0.4, 0.05, 16]} />
+                      <meshStandardMaterial color="#8B4513" />
+                    </mesh>
+                    {/* 土壤 */}
+                    <mesh position={[0, 0.35, 0]}>
+                      <cylinderGeometry args={[0.32, 0.32, 0.05, 16]} />
+                      <meshStandardMaterial color="#3D2314" />
+                    </mesh>
+                    {/* 植物 - 茎 */}
+                    <mesh position={[0, 0.5, 0]}>
+                      <cylinderGeometry args={[0.02, 0.02, 0.3, 8]} />
+                      <meshStandardMaterial color="#228B22" />
+                    </mesh>
+                    {/* 叶子1 */}
+                    <mesh position={[0.1, 0.6, 0]} rotation={[0, 0, -Math.PI / 4]}>
+                      <boxGeometry args={[0.15, 0.05, 0.25]} />
+                      <meshStandardMaterial color="#32CD32" />
+                    </mesh>
+                    {/* 叶子2 */}
+                    <mesh position={[-0.1, 0.55, 0]} rotation={[0, 0, Math.PI / 4]}>
+                      <boxGeometry args={[0.15, 0.05, 0.25]} />
+                      <meshStandardMaterial color="#32CD32" />
+                    </mesh>
+                    {/* 叶子3 */}
+                    <mesh position={[0, 0.65, 0.08]} rotation={[Math.PI / 6, 0, 0]}>
+                      <boxGeometry args={[0.12, 0.04, 0.2]} />
+                      <meshStandardMaterial color="#32CD32" />
+                    </mesh>
+                    {/* 花 */}
+                    <mesh position={[0, 0.75, 0]}>
+                      <sphereGeometry args={[0.08, 8, 8]} />
+                      <meshStandardMaterial color="#FF69B4" />
+                    </mesh>
+                  </group>
+                )
+              case 'decor_painting':
+                return (
+                  <group>
+                    {/* 外框 */}
+                    <mesh position={[0, 0.8, 0]}>
+                      <boxGeometry args={[1.2, 1.6, 0.08]} />
+                      <meshStandardMaterial color="#8B4513" />
+                    </mesh>
+                    {/* 内框 - 凹陷效果 */}
+                    <mesh position={[0, 0.8, 0.05]}>
+                      <boxGeometry args={[0.9, 1.3, 0.03]} />
+                      <meshStandardMaterial color="#654321" />
+                    </mesh>
+                    {/* 画布 */}
+                    <mesh position={[0, 0.8, 0.07]}>
+                      <boxGeometry args={[0.85, 1.25, 0.02]} />
+                      <meshStandardMaterial color="#F5F5DC" />
+                    </mesh>
+                    {/* 简单的风景画 - 山脉 */}
+                    <mesh position={[0, 0.6, 0.09]}>
+                      <coneGeometry args={[0.3, 0.4, 4]} />
+                      <meshStandardMaterial color="#4A6741" />
+                    </mesh>
+                    {/* 太阳 */}
+                    <mesh position={[0.25, 1.1, 0.09]}>
+                      <sphereGeometry args={[0.12, 8, 8]} />
+                      <meshStandardMaterial color="#FFD700" />
+                    </mesh>
+                    {/* 地面 */}
+                    <mesh position={[0, 0.35, 0.09]}>
+                      <boxGeometry args={[0.8, 0.2, 0.02]} />
+                      <meshStandardMaterial color="#8FBC8F" />
+                    </mesh>
+                  </group>
+                )
+              default:
+                // 其他装饰品暂时用简单的立方体
+                return (
+                  <mesh>
+                    <boxGeometry args={[0.8, 0.8, 0.8]} />
+                    <meshStandardMaterial color="#8B4513" />
+                  </mesh>
+                )
+            }
+          }
+
+          return (
+            <group
+              key={decoration.id}
+              position={decoration.position}
+              onClick={(e) => {
+                e.stopPropagation()
+                // Shift + 左键点击拆除
+                if ((e as any).shiftKey) {
+                  handleDecorationRemove(decoration.id)
+                }
+              }}
+              onPointerOver={(e) => {
+                e.stopPropagation()
+                document.body.style.cursor = (e as any).shiftKey ? 'pointer' : 'default'
+              }}
+              onPointerOut={(e) => {
+                e.stopPropagation()
+                document.body.style.cursor = 'default'
+              }}
+            >
+              {/* 装饰品3D模型 */}
+              {renderDecoration(decoration.decorationType)}
+
+              {/* 显示装饰品图标（悬浮在上方）- 已注释，使用纯3D模型 */}
+              {/* <Html
+                position={[0, 1.5, 0]}
+                center
+                distanceFactor={8}
+                style={{
+                  fontSize: '30px',
+                  pointerEvents: 'none',
+                  userSelect: 'none'
+                }}
+              >
+                <div style={{ fontSize: '30px', textShadow: '2px 2px 4px rgba(0,0,0,0.5)' }}>
+                  {getDecorationIcon(decoration.decorationType)}
+                </div>
+              </Html> */}
+            </group>
+          )
+        })}
 
         {/* 无限地面 - 已禁用，现在使用完整的地表方块系统 */}
         {/* <InfiniteGround playerPosition={playerPosition} /> */}
@@ -1504,23 +3035,107 @@ function FarmScene3D() {
         {/* 草地装饰（随机生成的草和花）- 已禁用 */}
         {/* <GrassDecorations /> */}
 
+        {/* ========== 测试果树（5种成熟果树） ========== */}
+        {/* 苹果树 */}
+        <FarmPlot
+          position={[5, 0, 0]}
+          state="tree"
+          treeType="apple"
+          plantTime={Date.now() - 1000 * 60 * 60 * 24} // 24小时前（成熟）
+          lastHarvestTime={Date.now() - 1000 * 60 * 30} // 30分钟前收获过
+          onClick={() => console.log('点击苹果树')}
+        />
+        {/* 橙子树 */}
+        <FarmPlot
+          position={[7, 0, 0]}
+          state="tree"
+          treeType="orange"
+          plantTime={Date.now() - 1000 * 60 * 60 * 25}
+          lastHarvestTime={Date.now() - 1000 * 60 * 30}
+          onClick={() => console.log('点击橙子树')}
+        />
+        {/* 桃树 */}
+        <FarmPlot
+          position={[9, 0, 0]}
+          state="tree"
+          treeType="peach"
+          plantTime={Date.now() - 1000 * 60 * 60 * 22}
+          lastHarvestTime={Date.now() - 1000 * 60 * 30}
+          onClick={() => console.log('点击桃树')}
+        />
+        {/* 樱桃树 */}
+        <FarmPlot
+          position={[11, 0, 0]}
+          state="tree"
+          treeType="cherry"
+          plantTime={Date.now() - 1000 * 60 * 60 * 18}
+          lastHarvestTime={Date.now() - 1000 * 60 * 30}
+          onClick={() => console.log('点击樱桃树')}
+        />
+        {/* 梨树 */}
+        <FarmPlot
+          position={[13, 0, 0]}
+          state="tree"
+          treeType="pear"
+          plantTime={Date.now() - 1000 * 60 * 60 * 24}
+          lastHarvestTime={Date.now() - 1000 * 60 * 30}
+          onClick={() => console.log('点击梨树')}
+        />
+        {/* ========== 测试果树结束 ========== */}
+
         {/* 无限树木 */}
         <InfiniteTrees playerPosition={playerPosition} onChop={handleTreeChop} />
       </Canvas>
 
       {/* 暂停菜单 */}
-      <PauseMenu isVisible={!isLocked && showPauseMenu} onResume={() => setShowPauseMenu(false)} />
+      <PauseMenu
+        isVisible={!isLocked && showPauseMenu}
+        isFirstTime={isFirstTime}
+        onResume={() => {
+          // 关闭暂停菜单和所有面板
+          setShowPauseMenu(false)
+          setShowColorPanel(false)
+          setShowInventory(false)
+          setShowShop(false)
+          setShowShortcutHelp(false)
+          setPlacingAnimal(null)
+          setPlacingMachine(null)
+          // 标记已不是首次进入
+          if (isFirstTime) {
+            setIsFirstTime(false)
+          }
+        }}
+      />
 
       {/* HUD */}
       <HUD
-        isVisible={isLocked}
+        isVisible={true}  // 始终显示 HUD
+        isLocked={isLocked}  // 单独传递锁定状态用于准心显示
         message={message}
         hotbarSlots={hotbarSlots}
         selectedHotbarSlot={selectedHotbarSlot}
-        buildMode={buildMode}
-        selectedMaterial={selectedMaterial}
-        cameraMode={cameraMode}
+        slotOffset={hotbarOffset}
         onSlotSelect={handleHotbarSlotSelect}
+        onShortcutHelpToggle={() => {
+          if (!showShortcutHelp) document.exitPointerLock()
+          setShowShortcutHelp((prev) => !prev)
+        }}
+        showShortcutHelp={showShortcutHelp}
+        onBackpackToggle={() => {
+          if (!showInventory) document.exitPointerLock()
+          setShowInventory((prev) => !prev)
+        }}
+        onShopToggle={() => {
+          if (!showShop) document.exitPointerLock()
+          setShowShop((prev) => !prev)
+        }}
+        onColorPanelToggle={() => {
+          if (!showColorPanel) document.exitPointerLock()
+          setShowColorPanel((prev) => !prev)
+        }}
+        showBackpack={showInventory}
+        showShop={showShop}
+        showColorPanel={showColorPanel}
       />
 
       {/* 挖掘进度条 */}
@@ -1536,6 +3151,12 @@ function FarmScene3D() {
         playerColors={playerColors}
         onColorChange={setPlayerColors}
         onClose={() => setShowColorPanel(false)}
+      />
+
+      {/* 快捷键帮助 */}
+      <ShortcutHelp
+        isVisible={showShortcutHelp}
+        onClose={() => setShowShortcutHelp(false)}
       />
 
       {/* 背包界面（旧版，暂时保留） */}
@@ -1572,6 +3193,30 @@ function FarmScene3D() {
         onBuyItem={buyItem}
         onSellItem={sellItem}
       />
+
+      {/* 机器面板 */}
+      {showMachinePanel && selectedMachine && placedMachines.has(selectedMachine) && (
+        <MachinePanel
+          machine={placedMachines.get(selectedMachine)!}
+          inventory={inventorySlots}  // 只传递 inventorySlots，避免重复计算
+          onClose={() => {
+            setShowMachinePanel(false)
+            setSelectedMachine(null)
+            // 设置冷却期，防止立即重新打开
+            setMachinePanelCooldown(true)
+            setTimeout(() => {
+              setMachinePanelCooldown(false)
+            }, 500) // 500ms冷却时间
+            // 重新获取指针锁定，恢复游戏控制
+            const canvas = document.querySelector('canvas')
+            if (canvas && !showInventory && !showShop && !showColorPanel && !showShortcutHelp) {
+              canvas.requestPointerLock()
+            }
+          }}
+          onStartProcessing={handleMachinePanelStartProcessing}
+          onCollectProduct={handleMachinePanelCollectProduct}
+        />
+      )}
     </div>
   )
 }
